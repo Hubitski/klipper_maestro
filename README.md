@@ -161,6 +161,18 @@ restart_method: command
 [mcu bed]
 serial: /tmp/klipper_mcu_bed
 restart_method: command
+
+# Emergency Power Cutoff & Startup Power Management for 24V PSU Relay
+[host_power]
+# Option A: Direct sysfs GPIO pin number on Orange Pi (e.g. 198)
+# pin: 198
+# Option B: Shell commands (if using gpioset, script, or wiringpi)
+# on_cmd: /home/pi/scripts/psu_24v.sh on
+# off_cmd: /home/pi/scripts/psu_24v.sh off
+# Time to wait after turning on 24V PSU before Klipper connects to MCUs:
+startup_delay: 1.5
+# Cut 24V power instantly on thermal runaway / M112 emergency stop (fire prevention):
+off_when_shutdown: True
 ```
 
 Start Klipper:
