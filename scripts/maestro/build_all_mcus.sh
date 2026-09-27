@@ -9,6 +9,7 @@ OUTPUT_DIR="${KLIPPER_DIR}/out/maestro_firmware"
 
 mkdir -p "${OUTPUT_DIR}"
 cd "${KLIPPER_DIR}"
+chmod +x "${KLIPPER_DIR}/scripts/"*.sh 2>/dev/null || true
 
 echo "=========================================================="
 echo " Building Klipper for Maestro Grand 2 IDEX (4 MCUs)"
@@ -25,6 +26,7 @@ build_target() {
     cp "${config_file}" "${KLIPPER_DIR}/.config"
     make olddefconfig
     make -j$(nproc 2>/dev/null || echo 2)
+    mkdir -p "${OUTPUT_DIR}"
     cp "${KLIPPER_DIR}/out/klipper.elf.hex" "${hex_output}"
     echo ">>> Generated: ${hex_output}"
     avr-size "${KLIPPER_DIR}/out/klipper.elf" || true
