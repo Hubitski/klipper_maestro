@@ -1,0 +1,22 @@
+# Systemd service for Maestro Grand 2 IDEX Host Serial Multiplexer
+# Installed on Orange Pi Zero (or host SBC)
+
+[Unit]
+Description=Maestro Grand 2 IDEX Klipper Serial Multiplexer Daemon
+Documentation=https://github.com/Klipper3d/klipper
+Before=klipper.service
+After=network.target local-fs.target
+
+[Service]
+Type=simple
+User=root
+# Set physical port and baud rate here if different
+Environment=SERIAL_PORT=/dev/ttyS0
+Environment=SERIAL_BAUD=250000
+ExecStart=/usr/bin/python3 /home/pi/klipper/scripts/maestro/host_multiplexer.py --port ${SERIAL_PORT} --baud ${SERIAL_BAUD}
+Restart=always
+RestartSec=2
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
