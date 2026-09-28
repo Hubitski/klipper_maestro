@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Build script for all 4 microcontrollers of Maestro Grand 2 IDEX
-set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KLIPPER_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -25,10 +24,14 @@ build_target() {
     make clean
     cp "${config_file}" "${KLIPPER_DIR}/.config"
     make olddefconfig
-    make -j$(nproc 2>/dev/null || echo 2)
-    mkdir -p "${OUTPUT_DIR}"
-    cp "${KLIPPER_DIR}/out/klipper.elf.hex" "${hex_output}"
-    echo ">>> Generated: ${hex_output}"
+    if make -j$(nproc 2>/dev/null || echo 2); then
+        mkdir -p "${OUTPUT_DIR}"
+        cp "${KLIPPER_DIR}/out/klipper.elf.hex" "${hex_output}"
+        echo ">>> Generated: ${hex_output}"
+    else
+        echo ">>> FAILED: ${target_name} - linking with --noinhibit-exec to show sizes..."
+        make -j$(nproc 2>/dev/null || echo 2) CFLAGS_klipper.elf="-Wl,--gc-sections -Wl,--noinhibit-exec" 2>/dev/null || true
+    fi
     avr-size "${KLIPPER_DIR}/out/klipper.elf" || true
 }
 
