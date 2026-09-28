@@ -105,6 +105,14 @@ config USB_SERIAL_NUMBER
 endmenu
 
 # Optional features that can be disabled (for devices with small flash sizes)
+config WANT_STEPPER
+    bool
+    depends on HAVE_GPIO
+    default y
+config WANT_ENDSTOP
+    bool
+    depends on HAVE_GPIO
+    default y
 config WANT_ADC
     bool
     depends on HAVE_GPIO_ADC
@@ -218,6 +226,15 @@ config NEED_SOS_FILTER
     default y
 menu "Optional features (to reduce code size)"
     depends on HAVE_LIMITED_CODE_SIZE
+config WANT_STEPPER
+    bool "Support stepper motor control"
+    depends on HAVE_GPIO
+config WANT_ENDSTOP
+    bool "Support endstop and trsync (homing/probing)"
+    depends on HAVE_GPIO
+config INLINE_STEPPER_HACK
+    bool "Inline stepper event into timer irq (faster but uses more flash)"
+    depends on HAVE_GPIO && WANT_STEPPER
 config WANT_ADC
     bool "Support micro-controller based ADC (analog to digital)"
     depends on HAVE_GPIO_ADC
@@ -322,7 +339,7 @@ config CANBUS_FILTER
 config INLINE_STEPPER_HACK
     # Enables gcc to inline stepper_event() into the main timer irq handler
     bool
-    depends on HAVE_GPIO
+    depends on HAVE_GPIO && WANT_STEPPER
     default y
 config HAVE_STEPPER_OPTIMIZED_BOTH_EDGE
     bool
