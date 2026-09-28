@@ -1,6 +1,7 @@
 # Main code build rules
 
-src-y += sched.c command.c basecmd.c debugcmds.c
+src-y += sched.c command.c basecmd.c
+src-$(CONFIG_WANT_DEBUGCMDS) += debugcmds.c
 src-$(CONFIG_HAVE_GPIO) += initial_pins.c gpiocmds.c
 src-$(CONFIG_WANT_STEPPER) += stepper.c
 src-$(CONFIG_WANT_ENDSTOP) += endstop.c trsync.c

@@ -105,6 +105,12 @@ config USB_SERIAL_NUMBER
 endmenu
 
 # Optional features that can be disabled (for devices with small flash sizes)
+config WANT_DEBUGCMDS
+    bool
+    default y
+config WANT_STATS
+    bool
+    default y
 config WANT_STEPPER
     bool
     depends on HAVE_GPIO
@@ -226,6 +232,10 @@ config NEED_SOS_FILTER
     default y
 menu "Optional features (to reduce code size)"
     depends on HAVE_LIMITED_CODE_SIZE
+config WANT_DEBUGCMDS
+    bool "Support debug read/write/ping commands"
+config WANT_STATS
+    bool "Support load statistics reporting"
 config WANT_STEPPER
     bool "Support stepper motor control"
     depends on HAVE_GPIO

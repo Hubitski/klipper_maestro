@@ -37,20 +37,20 @@ build_target "Motherboard (ATmega1284p)" \
     "${CONFIG_DIR}/config.mcu_motherboard_1284p" \
     "${OUTPUT_DIR}/klipper_mcu_motherboard_1284p.hex"
 
-# 2. Toolhead 0 (ATmega16A, Polled Slave, Node 0x20)
+# 2. Heated Bed (ATmega16A, Polled Slave, Node 0x40) - lightest build
+build_target "Heated Bed (ATmega16A)" \
+    "${CONFIG_DIR}/config.mcu_bed_atmega16" \
+    "${OUTPUT_DIR}/klipper_mcu_bed_atmega16.hex"
+
+# 3. Toolhead 0 (ATmega16A, Polled Slave, Node 0x20)
 build_target "Toolhead 0 Left (ATmega16A)" \
     "${CONFIG_DIR}/config.mcu_toolhead0_atmega16" \
     "${OUTPUT_DIR}/klipper_mcu_head0_atmega16.hex"
 
-# 3. Toolhead 1 (ATmega16A, Polled Slave, Node 0x30)
+# 4. Toolhead 1 (ATmega16A, Polled Slave, Node 0x30)
 build_target "Toolhead 1 Right (ATmega16A)" \
     "${CONFIG_DIR}/config.mcu_toolhead1_atmega16" \
     "${OUTPUT_DIR}/klipper_mcu_head1_atmega16.hex"
-
-# 4. Heated Bed (ATmega16A, Polled Slave, Node 0x40)
-build_target "Heated Bed (ATmega16A)" \
-    "${CONFIG_DIR}/config.mcu_bed_atmega16" \
-    "${OUTPUT_DIR}/klipper_mcu_bed_atmega16.hex"
 
 echo ""
 echo "=========================================================="

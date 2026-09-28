@@ -15,9 +15,9 @@
 #define MCUSR MCUCSR
 #endif
 
+#if defined(WDTCSR) && defined(WDIE)
 static uint8_t watchdog_shutdown;
 
-#if defined(WDTCSR) && defined(WDIE)
 ISR(WDT_vect)
 {
     watchdog_shutdown = 1;

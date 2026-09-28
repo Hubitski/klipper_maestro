@@ -5,6 +5,7 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 #include <string.h> // memset
+#include "autoconf.h" // CONFIG_WANT_STATS
 #include "basecmd.h" // oid_lookup
 #include "board/irq.h" // irq_save
 #include "board/misc.h" // alloc_maxsize
@@ -288,6 +289,8 @@ command_get_clock(uint32_t *args)
 }
 DECL_COMMAND_FLAGS(command_get_clock, HF_IN_SHUTDOWN, "get_clock");
 
+#if CONFIG_WANT_STATS
+
 static uint32_t stats_send_time, stats_send_time_high;
 
 void
@@ -337,6 +340,15 @@ stats_update(uint32_t start, uint32_t cur)
     stats_send_time = cur;
     count = sum = sumsq = 0;
 }
+
+#else
+
+void
+stats_update(uint32_t start, uint32_t cur)
+{
+}
+
+#endif
 
 
 /****************************************************************

@@ -14,7 +14,11 @@
 #include "sched.h" // sched_wake_tasks
 #include "serial_irq.h" // serial_enable_tx_irq
 
-#if CONFIG_HAVE_LIMITED_CODE_SIZE
+#if CONFIG_HAVE_LIMITED_CODE_SIZE && CONFIG_SERIAL_POLLED_SLAVE
+#define RX_BUFFER_SIZE 64
+static uint8_t receive_buf[RX_BUFFER_SIZE], receive_pos;
+static uint8_t transmit_buf[48], transmit_pos, transmit_max;
+#elif CONFIG_HAVE_LIMITED_CODE_SIZE
 #define RX_BUFFER_SIZE 96
 static uint8_t receive_buf[RX_BUFFER_SIZE], receive_pos;
 static uint8_t transmit_buf[64], transmit_pos, transmit_max;

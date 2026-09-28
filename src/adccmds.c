@@ -19,7 +19,11 @@ struct analog_in {
     uint8_t invalid_count, range_check_count;
     uint8_t state, sample_count;
     uint8_t bytes_per_report, data_count;
+#if CONFIG_HAVE_LIMITED_CODE_SIZE
+    uint8_t data[8];
+#else
     uint8_t data[48];
+#endif
     struct trigger_analog *ta;
 };
 
