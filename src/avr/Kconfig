@@ -108,8 +108,12 @@ config AVR_CLKPR
     default -1
 
 config AVR_STACK_SIZE
-    int
+    int "AVR stack size (bytes)" if LOW_LEVEL_OPTIONS
     default 256
+    help
+        The amount of SRAM reserved for the stack.  dynmem_end() subtracts
+        this value from the 256-byte aligned top of RAM, so smaller values
+        leave more room for the dynamic allocator (objects + move queue).
 
 config AVR_WATCHDOG
     bool
