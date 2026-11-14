@@ -112,8 +112,10 @@ config AVR_STACK_SIZE
     default 256
     help
         The amount of SRAM reserved for the stack.  dynmem_end() subtracts
-        this value from the 256-byte aligned top of RAM, so smaller values
-        leave more room for the dynamic allocator (objects + move queue).
+        this value from the top of RAM (RAMEND + 1), so smaller values leave
+        more room for the dynamic allocator (objects + move queue).  The
+        stack and the heap must never overlap; keep this large enough for
+        the deepest task/interrupt call chain.
 
 config AVR_WATCHDOG
     bool

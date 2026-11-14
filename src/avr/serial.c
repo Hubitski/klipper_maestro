@@ -208,7 +208,10 @@ ISR(USARTx_UDRE_vect)
 #if CONFIG_SERIAL_POLLED_SLAVE
         // All bytes written to UDR. Enable TX Complete interrupt to re-enable
         // receiver (RXEN) as soon as the final stop bit leaves the pin.
-        UCSRxA |= (1 << TXCx);
+        // Do NOT clear TXC here: if this ISR was delayed past the end of the
+        // last byte, TXC is already set and clearing it would lose the only
+        // completion event, leaving RXEN disabled forever.  With TXC set,
+        // enabling TXCIE fires the vector immediately (hardware clears TXC).
         UCSRxB |= (1 << TXCIEx);
 #endif
     } else {

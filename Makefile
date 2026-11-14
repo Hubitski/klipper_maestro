@@ -77,7 +77,7 @@ POST_LINK_CHECK ?= true
 $(OUT)klipper.elf: $(OBJS_klipper.elf)
 	@echo "  Linking $@"
 	$(Q)$(CC) $(OBJS_klipper.elf) $(CFLAGS_klipper.elf) -o $@ $(LINK_MORE)
-	$(Q)$(POST_LINK_CHECK) $@ "$(CONFIG_MCU)"
+	$(Q)$(POST_LINK_CHECK) $@ "$(CONFIG_MCU)" "$(OUT)link.log"
 	$(Q)scripts/check-gcc.sh $@ $(OUT)compile_time_request.o
 
 # Diagnostic link: keeps the ELF even if a memory region overflows so that

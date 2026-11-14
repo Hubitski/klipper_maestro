@@ -37,7 +37,13 @@ dynmem_start(void)
 void *
 dynmem_end(void)
 {
-    return (void*)ALIGN(AVR_STACK_POINTER_REG, 256) - CONFIG_AVR_STACK_SIZE;
+    // On every other supported AVR chip RAMEND+1 is already 256-byte
+    // aligned, so the historical ALIGN(AVR_STACK_POINTER_REG, 256) form is
+    // equivalent to RAMEND+1.  The ATmega16A has its 1KB SRAM at
+    // 0x60..0x45F, so ALIGN() would round 0x45F *up* to 0x500 - 160 bytes
+    // past the end of RAM - and the allocator would overwrite the stack and
+    // non-existent memory.  Use the top of RAM directly.
+    return (void*)(RAMEND + 1 - CONFIG_AVR_STACK_SIZE);
 }
 
 

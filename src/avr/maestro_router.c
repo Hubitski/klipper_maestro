@@ -171,8 +171,10 @@ ISR(USART1_UDRE_vect)
     if (ret) {
         // Buffer empty: disable UDRE and enable TX Complete (TXC) interrupt
         // to re-enable RXEN1 as soon as the final stop bit leaves the pin.
+        // Do NOT clear TXC1: if this ISR was delayed past the end of the
+        // last byte, TXC1 is already set and clearing it would lose the
+        // completion event, leaving RXEN1 disabled forever.
         UCSR1B &= ~(1 << UDRIE1);
-        UCSR1A |= (1 << TXC1); // Clear flag by writing 1
         UCSR1B |= (1 << TXCIE1);
     } else {
         UDR1 = data;

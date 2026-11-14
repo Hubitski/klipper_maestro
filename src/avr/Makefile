@@ -31,7 +31,9 @@ CFLAGS_klipper.elf := $(CFLAGS_klipper.elf) $(if $(filter 4.8.1, $(shell $(CC) -
 # ELF is far below the limit.  Keep the ELF on link errors and validate
 # the real sizes afterwards instead.
 CFLAGS_klipper.elf += -Wl,--noinhibit-exec
-LINK_MORE = || true
+# Keep the linker stderr so check-avr-size.sh can reject any diagnostic
+# other than the known-bogus overflow messages.
+LINK_MORE = 2> $(OUT)link.log || true
 POST_LINK_CHECK = sh scripts/check-avr-size.sh
 
 # Build the additional hex output file
