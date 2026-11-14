@@ -6,6 +6,9 @@ Description=Maestro Grand 2 IDEX Klipper Serial Multiplexer Daemon
 Documentation=https://github.com/Klipper3d/klipper
 Before=klipper.service
 After=network.target local-fs.target
+# Never give up restarting: /dev/ttyS1 may appear late, and klipper must
+# not start without the PTYs.  (Default StartLimit would trip after 5 tries.)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

@@ -289,8 +289,10 @@ command_get_clock(uint32_t *args)
 }
 DECL_COMMAND_FLAGS(command_get_clock, HF_IN_SHUTDOWN, "get_clock");
 
-#if CONFIG_WANT_STATS
-
+// The uptime command and the STATS_SUMSQ_BASE constant are required by
+// klippy unconditionally (clocksync uses get_uptime on every MCU and
+// MCUStatsHelper reads STATS_SUMSQ_BASE during mcu_identify), so they
+// must stay available even when load statistics reporting is disabled.
 static uint32_t stats_send_time, stats_send_time_high;
 
 void
@@ -302,15 +304,17 @@ command_get_uptime(uint32_t *args)
 }
 DECL_COMMAND_FLAGS(command_get_uptime, HF_IN_SHUTDOWN, "get_uptime");
 
+#define SUMSQ_BASE 256
+DECL_CONSTANT("STATS_SUMSQ_BASE", SUMSQ_BASE);
+
+#if CONFIG_WANT_STATS
+
 // Similar to timer_is_before(), but handles full 32bit duration
 static int
 timer_has_elapsed(uint32_t start, uint32_t cur, uint32_t duration)
 {
     return (uint32_t)(cur - start) >= duration;
 }
-
-#define SUMSQ_BASE 256
-DECL_CONSTANT("STATS_SUMSQ_BASE", SUMSQ_BASE);
 
 void
 stats_update(uint32_t start, uint32_t cur)
@@ -346,6 +350,11 @@ stats_update(uint32_t start, uint32_t cur)
 void
 stats_update(uint32_t start, uint32_t cur)
 {
+    // Keep the 32-bit uptime wrap counter current; klippy's clocksync
+    // always uses get_uptime even when stats reporting is disabled.
+    if (cur < stats_send_time)
+        stats_send_time_high++;
+    stats_send_time = cur;
 }
 
 #endif

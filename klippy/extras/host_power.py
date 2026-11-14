@@ -35,11 +35,21 @@ class HostPower:
                 "[%s] requires either 'pin' (sysfs GPIO number) or 'on_cmd' (shell command)"
                 % (self.name,)
             )
+        # Fire safety: there must be a way to actually cut the power.  Without
+        # this check a config with only on_cmd would silently "turn off"
+        # nothing on shutdown while reporting success.
+        if self.pin is None and not self.off_cmd:
+            raise config.error(
+                "[%s] requires 'off_cmd' (or 'pin') so power can be cut on shutdown"
+                % (self.name,)
+            )
 
         self.active_low = config.getboolean('active_low', False)
         self.startup_delay = config.getfloat('startup_delay', 1.5, minval=0.0)
         self.off_when_shutdown = config.getboolean('off_when_shutdown', True)
-        self.off_on_disconnect = config.getboolean('off_on_disconnect', True)
+        # Default False: a normal klippy exit/restart must not power-cycle the
+        # printer (and possibly the host itself).  Shutdowns still cut power.
+        self.off_on_disconnect = config.getboolean('off_on_disconnect', False)
 
         self.is_powered = False
 
@@ -71,7 +81,7 @@ class HostPower:
 
     def _set_gpio_sysfs(self, state):
         if self.pin is None:
-            return
+            return True
         pin_dir = "/sys/class/gpio/gpio%d" % (self.pin,)
         if not os.path.exists(pin_dir):
             try:
@@ -79,48 +89,73 @@ class HostPower:
                     f.write("%d\n" % (self.pin,))
                 time.sleep(0.05)
             except Exception as e:
-                logging.warning("host_power: Failed to export gpio%d: %s", self.pin, e)
+                logging.error("host_power: Failed to export gpio%d: %s",
+                              self.pin, e)
+                return False
+            if not os.path.exists(pin_dir):
+                logging.error("host_power: gpio%d did not appear after export",
+                              self.pin)
+                return False
 
         try:
             with open(os.path.join(pin_dir, "direction"), "w") as f:
                 f.write("out\n")
             # Determine output logic level
             val = 0 if (state == self.active_low) else 1
-            with open(os.path.join(pin_dir, "value"), "w") as f:
+            value_path = os.path.join(pin_dir, "value")
+            with open(value_path, "w") as f:
                 f.write("%d\n" % (val,))
+            # Verify that the write really took effect - a wrong pin number
+            # must not look like a successful power cut.
+            with open(value_path, "r") as f:
+                readback = int(f.read().strip())
+            if readback != val:
+                logging.error("host_power: gpio%d read back %d, expected %d",
+                              self.pin, readback, val)
+                return False
         except Exception as e:
-            logging.error("host_power: Failed to write to gpio%d: %s", self.pin, e)
+            logging.error("host_power: Failed to write to gpio%d: %s",
+                          self.pin, e)
+            return False
+        return True
 
     def _run_cmd(self, cmd):
         if not cmd:
-            return
+            return True
         try:
             res = subprocess.run(
                 cmd, shell=True, timeout=5,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             if res.returncode != 0:
-                logging.warning(
+                logging.error(
                     "host_power: Command '%s' exited with code %d: %s",
                     cmd, res.returncode, res.stderr.decode().strip()
                 )
+                return False
         except Exception as e:
             logging.error("host_power: Execution of '%s' failed: %s", cmd, e)
+            return False
+        return True
 
     def _set_power(self, state):
-        self.is_powered = state
+        ok = True
+        if self.pin is not None:
+            ok = self._set_gpio_sysfs(state) and ok
         if state:
-            if self.pin is not None:
-                self._set_gpio_sysfs(True)
             if self.on_cmd:
-                self._run_cmd(self.on_cmd)
-            logging.info("host_power: 24V PSU state -> ON")
+                ok = self._run_cmd(self.on_cmd) and ok
         else:
-            if self.pin is not None:
-                self._set_gpio_sysfs(False)
             if self.off_cmd:
-                self._run_cmd(self.off_cmd)
-            logging.info("host_power: 24V PSU state -> OFF")
+                ok = self._run_cmd(self.off_cmd) and ok
+        if ok:
+            self.is_powered = state
+            logging.info("host_power: 24V PSU state -> %s",
+                          "ON" if state else "OFF")
+        else:
+            logging.error("host_power: FAILED to switch 24V PSU %s",
+                          "ON" if state else "OFF")
+        return ok
 
     def _handle_shutdown(self):
         if self.off_when_shutdown:

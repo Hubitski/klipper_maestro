@@ -1,4 +1,5 @@
 out
+firmware
 *.so
 *.pyc
 .config

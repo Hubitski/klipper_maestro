@@ -242,8 +242,15 @@ class MaestroMultiplexer:
         # Half-Duplex Multi-Drop Bus Arbiter for MCP2561 peripherals (0x20, 0x30, 0x40)
         self.bus_busy: bool = False
         self.bus_active_dest: int = 0
-        self.bus_tx_time: float = 0.0
-        self.bus_timeout: float = 0.020  # 20ms timeout
+        # Time when the request was fully written to the UART (None while the
+        # request is still sitting in uart_tx_queue).
+        self.bus_tx_time: Optional[float] = None
+        # Time after which the bus may be released (set after response
+        # packets; the node may still be sending a trailing packet after its
+        # terminating ACK, so release only after a short silence).
+        self.bus_release_time: Optional[float] = None
+        self.bus_timeout: float = 0.050  # response timeout after the request
+        self.bus_guard: float = 0.003    # silence required after the last packet
         self.bus_pending_queue = collections.deque()
 
     def open_serial(self):
@@ -321,13 +328,32 @@ class MaestroMultiplexer:
         last_stat_time = time.time()
 
         while self.running:
-            # Check for bus timeout on multi-drop peripheral bus (20ms)
-            now = time.time()
-            if self.bus_busy and (now - self.bus_tx_time > self.bus_timeout):
-                logging.debug("Bus timeout waiting for response from 0x%02X, releasing bus", self.bus_active_dest)
-                self.bus_busy = False
-                self.bus_active_dest = 0
-                self._dispatch_next_bus_packet()
+            # Bus arbitration.  Never release the bus just because a 5-byte
+            # ACK was seen: the node may still be transmitting a trailing
+            # report.  Require BUS_GUARD seconds of silence after the last
+            # packet, or a response timeout if the node does not answer.
+            now = time.monotonic()
+            if self.bus_busy:
+                if self.bus_release_time is not None:
+                    if now >= self.bus_release_time and not self.uart_tx_queue:
+                        logging.debug(
+                            "Bus idle after response from 0x%02X, releasing",
+                            self.bus_active_dest)
+                        self.bus_busy = False
+                        self.bus_active_dest = 0
+                        self.bus_release_time = None
+                        self.bus_tx_time = None
+                        self._dispatch_next_bus_packet()
+                elif (self.bus_tx_time is not None
+                      and now - self.bus_tx_time > self.bus_timeout):
+                    logging.debug(
+                        "Bus timeout waiting for response from 0x%02X, releasing",
+                        self.bus_active_dest)
+                    self.bus_busy = False
+                    self.bus_active_dest = 0
+                    self.bus_release_time = None
+                    self.bus_tx_time = None
+                    self._dispatch_next_bus_packet()
 
             # Adjust poll events for UART write if there is pending data
             uart_events = select.POLLIN | select.POLLERR | select.POLLHUP
@@ -375,7 +401,8 @@ class MaestroMultiplexer:
             dest, pkt = self.bus_pending_queue.popleft()
             self.bus_busy = True
             self.bus_active_dest = dest
-            self.bus_tx_time = time.time()
+            self.bus_tx_time = None
+            self.bus_release_time = None
             self.uart_tx_queue.extend(pkt)
             self.handle_serial_write()
 
@@ -406,20 +433,13 @@ class MaestroMultiplexer:
                 logging.warning("UART received packet with unknown DEST=0x%02X, len=%d", dest, len(pkt))
                 continue
 
-            # If response came from the currently polled peripheral node,
-            # verify if this is the terminating ACK/NAK packet (len == MESSAGE_MIN, 5 bytes).
-            # In Klipper protocol, command responses may include multi-packet data
-            # (e.g. ADC/temperature reports) which are always terminated by an ACK/NAK (5 bytes).
+            # Any packet from the polled peripheral node keeps the bus.  The
+            # terminating ACK is not treated specially: an ISR can append a
+            # sensor report right after it, so release the bus only after a
+            # short period of silence (see the bus guard in run()).
             if self.bus_busy and dest == self.bus_active_dest:
-                if len(pkt) == MESSAGE_MIN:
-                    # Final ACK/NAK packet: peripheral node has finished its response burst
-                    self.bus_busy = False
-                    self.bus_active_dest = 0
-                    self._dispatch_next_bus_packet()
-                else:
-                    # Pre-ACK data packet: peripheral is still transmitting,
-                    # refresh bus activity timer to allow ACK to follow without timeout
-                    self.bus_tx_time = time.time()
+                self.bus_tx_time = time.monotonic()
+                self.bus_release_time = self.bus_tx_time + self.bus_guard
 
             # Upstream rewrite: Klippy expects DEST = 0x10
             if dest == DEFAULT_DEST:
@@ -444,6 +464,12 @@ class MaestroMultiplexer:
         except OSError as e:
             if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
                 logging.error("UART write error: %s", e)
+        # The response timeout starts only once the request has really been
+        # handed to the UART; with a backed-up queue the 50ms must not count
+        # from the moment the packet was enqueued.
+        if (not self.uart_tx_queue and self.bus_busy
+                and self.bus_tx_time is None and self.bus_release_time is None):
+            self.bus_tx_time = time.monotonic()
 
     def handle_channel_read(self, chan: VirtualChannel, poll: select.poll):
         try:
@@ -481,7 +507,8 @@ class MaestroMultiplexer:
                 if not self.bus_busy:
                     self.bus_busy = True
                     self.bus_active_dest = chan.node_id
-                    self.bus_tx_time = time.time()
+                    self.bus_tx_time = None
+                    self.bus_release_time = None
                     self.uart_tx_queue.extend(out_pkt)
                 else:
                     self.bus_pending_queue.append((chan.node_id, out_pkt))
@@ -537,6 +564,7 @@ def main():
         mux.run()
     except Exception as e:
         logging.exception("Multiplexer fatal error: %s", e)
+        sys.exit(1)
     finally:
         mux.cleanup()
         logging.info("Multiplexer stopped.")
