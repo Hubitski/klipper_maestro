@@ -4,6 +4,12 @@
 
 Custom fork of **Klipper** firmware providing complete support for the unique distributed 4-microcontroller architecture of the **Maestro Grand 2 IDEX** industrial 3D printer (400×400×400 mm build volume, independent dual extruders, nozzle strain-gauge Z leveling).
 
+> **АКТУАЛЬНОЕ СОСТОЯНИЕ (2026-11-14):** см.
+> [maestro_revision/CURRENT_STATE_2026-11-14.md](maestro_revision/CURRENT_STATE_2026-11-14.md).
+> Там реальная распиновка, все найденные и исправленные дефекты, открытые
+> риски и пошаговый план первого запуска. Часть утверждений ниже устарела
+> (в частности «9.2 КБ Flash / 490 Б SRAM» и `/dev/ttyS0`).
+
 ---
 
 ## 1. Hardware Architecture & Background
@@ -12,7 +18,7 @@ The Maestro Grand 2 IDEX printer uses a non-standard electronics topology:
 
 1. **Host SBC (Orange Pi Zero):**
    - Runs Linux, Klippy, Moonraker, and KlipperScreen.
-   - Physically wired **only to the motherboard** via USART0 (`/dev/ttyS0` or USB-UART).
+   - Physically wired **only to the motherboard** via USART0. On this printer that is **`/dev/ttyS1`** (`/dev/ttyS0` is the kernel serial console).
    - Has **no direct physical connection** to the toolhead or heated bed boards.
 
 2. **Motherboard (ATmega1284p):**
@@ -46,7 +52,7 @@ The Maestro Grand 2 IDEX printer uses a non-standard electronics topology:
 ## 3. What Was Implemented & Fixed
 
 ### 1. Porting Klipper Core to ATmega16A (`src/avr/`)
-* **Processor Configuration:** Added `MACH_atmega16` to `src/avr/Kconfig` with automatic selection of `HAVE_LIMITED_CODE_SIZE` (compilation with `-Os`, compact queues). Firmware uses only ~9.2 KB Flash (out of 16 KB) and ~490 bytes SRAM (out of 1 KB).
+* **Processor Configuration:** Added `MACH_atmega16` to `src/avr/Kconfig` with automatic selection of `HAVE_LIMITED_CODE_SIZE` (compilation with `-Os`, compact queues). Current measured sizes (2026-11-14): toolheads **16284 B Flash (99.4%) / 227 B static RAM** (they include HX711 + trigger_analog + SPI for the toolhead TMC2130), bed 8696 B, motherboard 45094 B. The earlier "9.2 KB / 490 B" figure was wrong.
 * **UART Subsystem (`src/avr/serial.c`):**
   - Mapped unindexed registers (`UCSRA`, `UCSRB`, `UCSRC`, `UBRRL`, `UBRRH`, `UDR`).
   - Implemented explicit split write for `UBRRH` (bit 7 `URSEL = 0`) and `UCSRC` (bit 7 `URSEL = 1`), solving the shared `$20` I/O address conflict.
@@ -135,7 +141,7 @@ cd ~/klipper
 chmod +x scripts/maestro/build_all_mcus.sh
 ./scripts/maestro/build_all_mcus.sh
 ```
-Compiled `.hex` files will be placed in `out/maestro_firmware/`:
+Compiled `.hex` files will be placed in **`firmware/`** (not `out/`: every target starts with `make clean`, which would delete the previous targets' files):
 * `klipper_mcu_motherboard_1284p.hex` (Flash to motherboard via USB/UART bootloader)
 * `klipper_mcu_head0_atmega16.hex` (Flash to Toolhead 0 via ISP programmer)
 * `klipper_mcu_head1_atmega16.hex` (Flash to Toolhead 1 via ISP programmer)
@@ -167,8 +173,8 @@ restart_method: command
 # Option A: Direct sysfs GPIO pin number on Orange Pi (e.g. 198)
 # pin: 198
 # Option B: Shell commands (if using gpioset, script, or wiringpi)
-# on_cmd: /home/pi/scripts/psu_24v.sh on
-# off_cmd: /home/pi/scripts/psu_24v.sh off
+# on_cmd: /home/klipper/scripts/psu_24v.sh on
+# off_cmd: /home/klipper/scripts/psu_24v.sh off
 # Time to wait after turning on 24V PSU before Klipper connects to MCUs:
 startup_delay: 1.5
 # Cut 24V power instantly on thermal runaway / M112 emergency stop (fire prevention):
