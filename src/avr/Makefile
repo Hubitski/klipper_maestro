@@ -23,6 +23,17 @@ src-$(CONFIG_MAESTRO_ROUTER) += avr/maestro_router.c
 # Suppress broken "misspelled signal handler" warnings on gcc 4.8.1
 CFLAGS_klipper.elf := $(CFLAGS_klipper.elf) $(if $(filter 4.8.1, $(shell $(CC) -dumpversion)), -w)
 
+# Some AVR linkers (notably binutils 2.26 from the Debian/Atmel toolchain)
+# run the memory-region overflow check before --gc-sections is applied.
+# At that point unused .rodata / .compile_time_request sections are still
+# counted against the small SRAM region, so such linkers report bogus
+# errors like "region `data' overflowed by N bytes" even though the final
+# ELF is far below the limit.  Keep the ELF on link errors and validate
+# the real sizes afterwards instead.
+CFLAGS_klipper.elf += -Wl,--noinhibit-exec
+LINK_MORE = || true
+POST_LINK_CHECK = sh scripts/check-avr-size.sh
+
 # Build the additional hex output file
 target-y += $(OUT)klipper.elf.hex
 

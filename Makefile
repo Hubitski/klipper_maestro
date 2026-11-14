@@ -68,9 +68,16 @@ $(OUT)%.ld: %.lds.S $(OUT)autoconf.h
 	@echo "  Preprocessing $@"
 	$(Q)$(CPP) -I$(OUT) -P -MD -MT $@ $< -o $@
 
+# Board makefiles may append extra linker handling here.  The AVR build
+# sets LINK_MORE to keep the ELF when an old linker reports a bogus
+# memory-region overflow and POST_LINK_CHECK to validate the real sizes.
+LINK_MORE ?=
+POST_LINK_CHECK ?= true
+
 $(OUT)klipper.elf: $(OBJS_klipper.elf)
 	@echo "  Linking $@"
-	$(Q)$(CC) $(OBJS_klipper.elf) $(CFLAGS_klipper.elf) -o $@
+	$(Q)$(CC) $(OBJS_klipper.elf) $(CFLAGS_klipper.elf) -o $@ $(LINK_MORE)
+	$(Q)$(POST_LINK_CHECK) $@ "$(CONFIG_MCU)"
 	$(Q)scripts/check-gcc.sh $@ $(OUT)compile_time_request.o
 
 # Diagnostic link: keeps the ELF even if a memory region overflows so that
