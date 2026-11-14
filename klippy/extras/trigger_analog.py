@@ -271,13 +271,22 @@ class MCU_SosFilter:
 class MCU_trigger_analog:
     MONITOR_MAX = 3
     REASON_TRIGGER_ANALOG = mcu.MCU_trsync.REASON_COMMS_TIMEOUT + 1
+    # Interval used to poke the sensor MCU while homing.  On a strict
+    # polled multi-drop bus the MCU only transmits in response to a host
+    # command, so the trsync trigger message would otherwise wait for the
+    # next regular command (up to ~0.3s) and the 25ms multi-MCU trsync
+    # timeout would fire before the host learns about the trigger.
+    POLL_INTERVAL = 0.008
     def __init__(self, sensor_inst):
         self._printer = sensor_inst.get_mcu().get_printer()
         self._sensor = sensor_inst
         self._mcu = self._sensor.get_mcu()
+        self._reactor = self._printer.get_reactor()
         self._sos_filter = None
         self._dispatch = mcu.TriggerDispatch(self._mcu)
         self._last_trigger_time = 0.
+        self._poll_timer = None
+        self._poll_deadline = 0.
         # Raw range checking
         self._raw_min = self._raw_max = 0
         self._last_range_args = None
@@ -362,7 +371,35 @@ class MCU_trigger_analog:
         # Update sos filter in mcu
         self._sos_filter.reset_filter()
 
+    # Periodic poke so a polled MCU flushes queued async messages
+    def _poll_event(self, eventtime):
+        # Safety net: never poll forever if homing was aborted somewhere
+        # without home_wait() being called.
+        if eventtime > self._poll_deadline:
+            self._stop_polling()
+            return self._reactor.NEVER
+        if self._last_range_args is not None:
+            # Idempotent command: re-send the current raw range.  The MCU
+            # answers with an ACK and, importantly, flushes any messages
+            # already waiting in its transmit buffer (e.g. the trsync_state
+            # produced by the load cell trigger).
+            self._set_raw_range_cmd.send(list(self._last_range_args))
+        return eventtime + self.POLL_INTERVAL
+
+    def _start_polling(self):
+        if self._poll_timer is None:
+            now = self._reactor.monotonic()
+            self._poll_deadline = now + 10.
+            self._poll_timer = self._reactor.register_timer(
+                self._poll_event, now + self.POLL_INTERVAL)
+
+    def _stop_polling(self):
+        if self._poll_timer is not None:
+            self._reactor.unregister_timer(self._poll_timer)
+            self._poll_timer = None
+
     def _clear_home(self):
+        self._stop_polling()
         self._home_cmd.send([self._oid, 0, 0, 0, 0, 0, 0, 0])
         params = self._query_state_cmd.send([self._oid])
         trigger_ticks = self._mcu.clock32_to_clock64(params['homing_clock'])
@@ -382,10 +419,14 @@ class MCU_trigger_analog:
         self._home_cmd.send([self._oid, self._dispatch.get_oid(),
             mcu.MCU_trsync.REASON_ENDSTOP_HIT, self.REASON_TRIGGER_ANALOG,
             clock, sm_ticks, self.MONITOR_MAX], reqclock=clock)
+        self._start_polling()
         return trigger_completion
 
     def home_wait(self, home_end_time):
-        self._dispatch.wait_end(home_end_time)
+        try:
+            self._dispatch.wait_end(home_end_time)
+        finally:
+            self._stop_polling()
         # trigger has happened, now to find out why...
         res = self._dispatch.stop()
         # clear the homing state so it stops processing samples
