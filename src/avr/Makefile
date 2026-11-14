@@ -31,6 +31,10 @@ CFLAGS_klipper.elf := $(CFLAGS_klipper.elf) $(if $(filter 4.8.1, $(shell $(CC) -
 # ELF is far below the limit.  Keep the ELF on link errors and validate
 # the real sizes afterwards instead.
 CFLAGS_klipper.elf += -Wl,--noinhibit-exec
+# Relax CALL/JMP to RCALL/RJMP on chips with more than 8KB of flash.  This
+# saves a few hundred bytes and is required to fit the ATmega16A toolhead
+# firmware (HX711 + trigger_analog + hardware SPI for the TMC2130).
+CFLAGS_klipper.elf += -Wl,--relax
 # Keep the linker stderr so check-avr-size.sh can reject any diagnostic
 # other than the known-bogus overflow messages.
 LINK_MORE = 2> $(OUT)link.log || true

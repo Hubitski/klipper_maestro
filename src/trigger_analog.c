@@ -40,11 +40,16 @@ enum {
 
 // Trigger types
 enum {
-    TT_ABS_GE, TT_GT, TT_DIFF_PEAK_GT
+    TT_ABS_GE,
+#if !CONFIG_HAVE_LIMITED_CODE_SIZE
+    TT_GT, TT_DIFF_PEAK_GT
+#endif
 };
 DECL_ENUMERATION("trigger_analog_type", "abs_ge", TT_ABS_GE);
+#if !CONFIG_HAVE_LIMITED_CODE_SIZE
 DECL_ENUMERATION("trigger_analog_type", "gt", TT_GT);
 DECL_ENUMERATION("trigger_analog_type", "diff_peak_gt", TT_DIFF_PEAK_GT);
+#endif
 
 // Sample errors sent via trsync error code
 enum {
@@ -52,11 +57,16 @@ enum {
 };
 DECL_ENUMERATION("trigger_analog_error:", "RAW_RANGE", TE_RAW_RANGE);
 DECL_ENUMERATION("trigger_analog_error:", "OVERFLOW", TE_OVERFLOW);
+#if !CONFIG_HAVE_LIMITED_CODE_SIZE
 DECL_ENUMERATION("trigger_analog_error:", "MONITOR", TE_MONITOR);
+#endif
 DECL_ENUMERATION("trigger_analog_error:", "SENSOR_SPECIFIC"
                  , TE_SENSOR_SPECIFIC);
 
-// Timer callback that monitors for sensor timeouts
+#if !CONFIG_HAVE_LIMITED_CODE_SIZE
+// Timer callback that monitors for sensor timeouts.
+// On 16KB MCUs this is compiled out: a stalled sensor is still caught by
+// the trsync communication timeout, and the code/identify data do not fit.
 static uint_fast8_t
 monitor_event(struct timer *t)
 {
@@ -82,11 +92,18 @@ monitor_note_activity(struct trigger_analog *ta)
 {
     writeb(&ta->monitor_count, 0);
 }
+#endif
 
 // Check if a value should signal a "trigger" event
 static int
 check_trigger(struct trigger_analog *ta, uint32_t time, int32_t value)
 {
+#if CONFIG_HAVE_LIMITED_CODE_SIZE
+    // Limited builds only support the "abs_ge" trigger that load_cell_probe
+    // uses; the other modes cost flash that is not available on 16KB AVRs.
+    uint32_t abs_value = value < 0 ? -(uint32_t)value : (uint32_t)value;
+    return abs_value >= (uint32_t)ta->trigger_value;
+#else
     switch (ta->trigger_type) {
     case TT_ABS_GE: ;
         uint32_t abs_value = value < 0 ? -value : value;
@@ -102,13 +119,18 @@ check_trigger(struct trigger_analog *ta, uint32_t time, int32_t value)
         return delta > ta->trigger_value;
     }
     return 0;
+#endif
 }
 
 // Reset fields associated with trigger checking
 static void
 trigger_reset(struct trigger_analog *ta)
 {
+#if !CONFIG_HAVE_LIMITED_CODE_SIZE
     ta->trigger_peak = INT32_MIN;
+#else
+    (void)ta;
+#endif
 }
 
 // Stop homing due to an error
@@ -147,8 +169,10 @@ trigger_analog_update(struct trigger_analog *ta, int32_t sample)
         return;
     flags &= ~TA_AWAIT_HOMING;
 
+#if !CONFIG_HAVE_LIMITED_CODE_SIZE
     // Reset the sensor timeout checking
     monitor_note_activity(ta);
+#endif
 
     // Check that raw value is in range
     if (sample < ta->raw_min || sample > ta->raw_max) {
@@ -231,12 +255,16 @@ command_trigger_analog_home(uint32_t *args)
     ta->trigger_reason = args[2];
     ta->error_reason = args[3];
     ta->time.waketime = ta->homing_clock = args[4];
+#if !CONFIG_HAVE_LIMITED_CODE_SIZE
     ta->monitor_max = args[6];
     ta->monitor_count = 0;
     ta->time.func = monitor_event;
+#endif
     ta->flags = TA_AWAIT_HOMING | TA_CAN_TRIGGER;
     trigger_reset(ta);
+#if !CONFIG_HAVE_LIMITED_CODE_SIZE
     sched_add_timer(&ta->time);
+#endif
 }
 DECL_COMMAND(command_trigger_analog_home,
              "trigger_analog_home oid=%c trsync_oid=%c trigger_reason=%c"
