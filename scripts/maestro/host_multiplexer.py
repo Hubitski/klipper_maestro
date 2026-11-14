@@ -9,7 +9,7 @@ This daemon runs on the host (Orange Pi Zero) and creates 4 virtual pseudo-termi
   - /tmp/klipper_mcu_head1 (Toolhead 1 MCU: ATmega16A, DEST = 0x30)
   - /tmp/klipper_mcu_bed   (Heated Bed MCU: ATmega16A, DEST = 0x40)
 
-All 4 virtual streams are multiplexed onto a single physical serial port (/dev/ttyS0)
+All 4 virtual streams are multiplexed onto a single physical serial port (/dev/ttyS1)
 connected to the Motherboard ATmega1284p gateway router.
 
 Downstream (Klippy -> Physical UART):
@@ -499,7 +499,7 @@ class MaestroMultiplexer:
 
 def main():
     parser = argparse.ArgumentParser(description="Maestro Grand 2 IDEX Klipper Serial Multiplexer")
-    parser.add_argument("--port", default="/dev/ttyS0", help="Physical serial port (default: /dev/ttyS0)")
+    parser.add_argument("--port", default="/dev/ttyS1", help="Physical serial port (default: /dev/ttyS1)")
     parser.add_argument("--baud", type=int, default=250000, help="Physical baud rate (default: 250000)")
     parser.add_argument("--main-path", default="/tmp/klipper_mcu_main", help="Symlink path for main MCU PTY")
     parser.add_argument("--head0-path", default="/tmp/klipper_mcu_head0", help="Symlink path for head0 MCU PTY")
