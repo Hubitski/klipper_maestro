@@ -33,6 +33,7 @@ import os
 import sys
 import time
 import errno
+import fcntl
 import select
 import signal
 import logging
@@ -156,8 +157,8 @@ class VirtualChannel:
         tty.setraw(self.slave_fd)
 
         # Set non-blocking on master_fd
-        flags = os.fcntl(self.master_fd, os.F_GETFL)
-        os.fcntl(self.master_fd, os.F_SETFL, flags | os.O_NONBLOCK)
+        flags = fcntl.fcntl(self.master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
         # Allow non-root users (pi, orangepi, klipper) to access the PTY slave
         try:
@@ -262,8 +263,8 @@ class MaestroMultiplexer:
             raise SystemExit(1)
 
         # Ensure non-blocking
-        flags = os.fcntl(self.serial_fd, os.F_GETFL)
-        os.fcntl(self.serial_fd, os.F_SETFL, flags | os.O_NONBLOCK)
+        flags = fcntl.fcntl(self.serial_fd, fcntl.F_GETFL)
+        fcntl.fcntl(self.serial_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         logging.info("Physical serial port %s opened successfully (fd=%d)", self.serial_port, self.serial_fd)
 
     def setup(self):
@@ -336,7 +337,7 @@ class MaestroMultiplexer:
 
             try:
                 events = poll.poll(5) # 5ms timeout for responsive half-duplex arbitration
-            except select.error as e:
+            except OSError as e:
                 if e.args[0] == errno.EINTR:
                     continue
                 raise
