@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KLIPPER_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CONFIG_DIR="${SCRIPT_DIR}/configs"
 OUTPUT_DIR="${KLIPPER_DIR}/out/maestro_firmware"
+BUILD_FAILURES=0
 
 mkdir -p "${OUTPUT_DIR}"
 cd "${KLIPPER_DIR}"
@@ -28,11 +29,16 @@ build_target() {
         mkdir -p "${OUTPUT_DIR}"
         cp "${KLIPPER_DIR}/out/klipper.elf.hex" "${hex_output}"
         echo ">>> Generated: ${hex_output}"
+        avr-size "${KLIPPER_DIR}/out/klipper.elf"
     else
-        echo ">>> FAILED: ${target_name} - linking with --noinhibit-exec to show sizes..."
-        make -j$(nproc 2>/dev/null || echo 2) CFLAGS_klipper.elf="-Wl,--gc-sections -Wl,--noinhibit-exec" 2>/dev/null || true
+        echo ""
+        echo ">>> FAILED: ${target_name} - memory overflow."
+        echo ">>> Building diagnostic ELF to show real memory requirements..."
+        make diag || true
+        echo ">>> Note: out/klipper_diag.elf is NOT flashable, it is only"
+        echo ">>>       a size report for the overflowing build."
+        BUILD_FAILURES=$((BUILD_FAILURES + 1))
     fi
-    avr-size "${KLIPPER_DIR}/out/klipper.elf" || true
 }
 
 # 1. Motherboard (ATmega1284p, Router enabled, Node 0x10)
@@ -57,7 +63,13 @@ build_target "Toolhead 1 Right (ATmega16A)" \
 
 echo ""
 echo "=========================================================="
-echo " All 4 firmware binaries built successfully!"
-echo " Location: ${OUTPUT_DIR}/"
-ls -lh "${OUTPUT_DIR}"/*.hex
+if [ "${BUILD_FAILURES}" -eq 0 ]; then
+    echo " All 4 firmware binaries built successfully!"
+    echo " Location: ${OUTPUT_DIR}/"
+    ls -lh "${OUTPUT_DIR}"/*.hex
+else
+    echo " RESULT: ${BUILD_FAILURES} of 4 builds FAILED (see size reports above)."
+    echo " Successful binaries are still in: ${OUTPUT_DIR}/"
+fi
 echo "=========================================================="
+exit "${BUILD_FAILURES}"

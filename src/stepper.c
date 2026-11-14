@@ -369,6 +369,7 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
 }
 
 // Set the stepper to stop on a "trigger event" (used in homing)
+#if CONFIG_WANT_ENDSTOP
 void
 command_stepper_stop_on_trigger(uint32_t *args)
 {
@@ -378,6 +379,7 @@ command_stepper_stop_on_trigger(uint32_t *args)
 }
 DECL_COMMAND(command_stepper_stop_on_trigger,
              "stepper_stop_on_trigger oid=%c trsync_oid=%c");
+#endif
 
 void
 stepper_shutdown(void)

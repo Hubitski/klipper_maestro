@@ -73,6 +73,23 @@ $(OUT)klipper.elf: $(OBJS_klipper.elf)
 	$(Q)$(CC) $(OBJS_klipper.elf) $(CFLAGS_klipper.elf) -o $@
 	$(Q)scripts/check-gcc.sh $@ $(OUT)compile_time_request.o
 
+# Diagnostic link: keeps the ELF even if a memory region overflows so that
+# avr-size/avr-nm can report the real memory requirements.
+# Use "make diag" (never as a dependency of "all").
+diag: $(OBJS_klipper.elf)
+	@echo "  Diagnostic link (keeping ELF despite overflow)"
+	-$(Q)$(CC) $(OBJS_klipper.elf) $(CFLAGS_klipper.elf) -Wl,--noinhibit-exec \
+		-o $(OUT)klipper_diag.elf
+	@echo "  ===== avr-size ====="
+	-$(Q)$(CROSS_PREFIX)size $(OUT)klipper_diag.elf
+	@echo "  ===== section sizes ====="
+	-$(Q)$(CROSS_PREFIX)size -A $(OUT)klipper_diag.elf
+	@echo "  ===== largest RAM symbols (data+bss) ====="
+	-$(Q)$(CROSS_PREFIX)nm -S --size-sort --radix=d $(OUT)klipper_diag.elf 2>/dev/null \
+		| awk '$$3 ~ /^[bBdDgG]$$/ { print }' | tail -40
+	@echo "  ===== .data contents (first 512 bytes) ====="
+	-$(Q)$(CROSS_PREFIX)objdump -s -j .data $(OUT)klipper_diag.elf 2>/dev/null | head -40
+
 ################ Compile time requests
 
 $(OUT)%.o.ctr: $(OUT)%.o
@@ -120,7 +137,7 @@ menuconfig:
 ################ Generic rules
 
 # Make definitions
-.PHONY : all clean distclean olddefconfig menuconfig create-board-link FORCE
+.PHONY : all clean distclean olddefconfig menuconfig create-board-link diag FORCE
 .DELETE_ON_ERROR:
 
 all: $(target-y)
