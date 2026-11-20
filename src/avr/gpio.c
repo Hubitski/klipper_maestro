@@ -86,13 +86,19 @@ gpio_out_reset(struct gpio_out g, uint8_t val)
 void
 gpio_out_toggle_noirq(struct gpio_out g)
 {
-    g.regs->in = g.bit;
+    // ATmega16A (and other classic AVRs) has no PINx write-to-toggle
+    // feature: PINA..PIND are read-only (datasheet 8154C, 12.1 and 12.4.4)
+    // so the upstream "write to the input register" trick does nothing.
+    // Toggle the output register instead; this works on every AVR.
+    g.regs->out ^= g.bit;
 }
 
 void
 gpio_out_toggle(struct gpio_out g)
 {
+    irqstatus_t flag = irq_save();
     gpio_out_toggle_noirq(g);
+    irq_restore(flag);
 }
 
 void
