@@ -162,12 +162,13 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     if (counts & 0x800000)
         counts |= 0xFF000000;
 
-    // Check for errors
-    uint_fast8_t extras_mask = (1 << gain_channel) - 1;
-    if ((adc & extras_mask) != extras_mask) {
-        // Transfer did not complete correctly
-        hx71x->last_error = SAMPLE_ERROR_DESYNC;
-    } else if (flags & HX_OVERFLOW) {
+    // Check for errors.  Do not treat the extra gain-selection clock bits
+    // as a desync indicator: some HX711 modules do not drive DOUT high
+    // immediately after the last (gain-select) pulse, so those bits read
+    // back as zero even though the 24 data bits are perfectly valid.  A
+    // plain Arduino sketch that ignores that pulse works with such
+    // modules.  A too-long read is still reported.
+    if (flags & HX_OVERFLOW) {
         // Transfer took too long
         hx71x->last_error = SAMPLE_ERROR_READ_TOO_LONG;
     }
