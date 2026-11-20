@@ -16,19 +16,21 @@
   (`eb0361b`), **но новая прошивка головы ещё не залита** — нужна
   перепрошивка head0.
 - Старый сервис реле `relay-toggle.service` **остановлен и отключён**
-  (`inactive`, `disabled`). GPIO6 сейчас не экспортирован.
-- `[host_power]` **добавлен в `printer.cfg`**, но не работает: Klipper
-  запущен под пользователем `klipper`, а `/sys/class/gpio/export` —
-  root-only (`--w------- root root`). В логе:
-  `host_power: Failed to export gpio6: [Errno 13] Permission denied`,
-  `FAILED to switch 24V PSU ON/OFF`. M80/M81 не работали. Нужен
-  root-oneshot, который экспортирует GPIO6, ставит `direction=out`,
-  `value=1` и делает `chown klipper:klipper` (или `chmod 660`) для
-  `gpio6/direction` и `gpio6/value` до старта Klipper.
-- Реле, судя по логам модуля, коммутирует **24 В PSU принтера**, а не
-  питание Orange Pi (Pi не может питаться от реле, которое сам включает
-  при загрузке). Физически не проверялось — перед M81 проверить, что
-  SSH/питание Pi не зависят от реле.
+  (`inactive`, `disabled`).
+- **`[host_power]` работает.** Причина отказа была в правах: Klipper
+  работает под `klipper`, а `/sys/class/gpio/export` и `/dev/gpiochip0` —
+  root-only. Поставлен root-oneshot `/etc/systemd/system/maestro-gpio6.service`
+  (enabled, `DefaultDependencies=no`, `Before=klipper.service`): экспортирует
+  GPIO6, ставит `direction=out`, `value=1`, затем
+  `chown klipper:klipper /sys/class/gpio/gpio6/` (со слэшем — chown самого
+  симлинка не меняет владельца файлов `direction`/`value`). В логе теперь
+  `host_power: 24V PSU state -> ON`; `M80` отвечает
+  `24V Power Supply is already ON`.
+- Реле коммутирует **24 В PSU / питание плат**, но **не Orange Pi** —
+  проверено фактически: при `gpio6/value=0` SSH к Pi остаётся живым.
+  `M81` снимает питание с MCU → Klipper уходит в shutdown, и после этого
+  `M80` из gcode уже не выполнить (команды в shutdown блокируются);
+  возврат — только скриптом/сервисами (см. §9.10).
 
 ## 2. Железо и топология
 
@@ -225,15 +227,11 @@ HX711. Новая (16212 Б, `eb0361b`) лежит в `firmware/` и в
 1. **Залить новую прошивку head0 (16212 Б, `eb0361b`)** — фикс HX711.
    После этого: `LOAD_CELL_CALIBRATE`, `PROBE_CALIBRATE`,
    `Z_OFFSET_APPLY_PROBE`, `G28 Z`.
-2. **`[host_power]` уже добавлен, но не работает из-за прав GPIO.**
-   Klipper под пользователем `klipper` не может export GPIO6
-   (`/sys/class/gpio/export` root-only); в логе `Permission denied`,
-   `FAILED to switch 24V PSU ON/OFF`; M80/M81 ни разу не проходили.
-   Нужен root-oneshot до старта Klipper: export GPIO6, `direction=out`,
-   `value=1`, `chown klipper:klipper` (или `chmod 660`) для
-   `gpio6/direction` и `gpio6/value`. Реле, судя по логам модуля,
-   коммутирует **24 В PSU**, не питание Orange Pi (проверить физически
-   перед M81).
+2. **`[host_power]` — сделано** (root-oneshot `maestro-gpio6.service`,
+   см. §1). Осталось осознанно проверить `M81`: он снимает 24 В и роняет
+   MCU → shutdown, после чего `M80` недоступен. Если нужен возврат без
+   ручного вмешательства — либо разрешить `M80` в состоянии shutdown, либо
+   питать MCU от отдельной 5 В линии.
 3. **Правая голова (head1) не связывается.** Отличия: 120 Ом терминатор
    (правильный), `PB3` 0 Ом на землю на head0 и отсутствует на head1.
    Гипотеза: этот net управляет `STBY` (пин 8) MCP2561; STBY должен быть
@@ -258,6 +256,19 @@ HX711. Новая (16212 Б, `eb0361b`) лежит в `firmware/` и в
    цель от USB; перед прошивкой проверить 5 В на плате. Для стола не
    подавать 24 В нагревателя; достаточно 5 В логики. Если VCC нет —
    подать 5 В от лабораторного/принтерного БП (24 В выключено).
+10. **Рестарт Klipper на этой шине — осторожно.** `systemctl restart
+    klipper` **не сбрасывает MCU**: событие `klipper:firmware_restart`
+    бывает только при команде `FIRMWARE_RESTART`. Проверено 2026-11-20:
+    после рестарта head0 продолжал старый поток `sensor_bulk_data`,
+    затем ушёл в `MCU 'head0' shutdown: Invalid oid type`; `host_power`
+    штатно снял 24 В. Отдельно: `host` — постоянный root-сервис
+    `klipper-mcu.service`; после аварии он остаётся в shutdown и следующий
+    старт падает с `Can not update MCU 'host' config as it is shutdown`.
+    Безопасный порядок восстановления:
+    `systemctl stop klipper` → `systemctl restart klipper-mcu.service` →
+    power-cycle реле (`echo 0/1 > /sys/class/gpio/gpio6/value`) →
+    `systemctl start klipper`. Для плановых перезапусков использовать
+    `FIRMWARE_RESTART`, а не рестарт сервиса.
 
 ## 10. Правила работы
 
