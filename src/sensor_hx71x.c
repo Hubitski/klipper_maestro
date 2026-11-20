@@ -58,10 +58,13 @@ hx71x_raw_read(struct gpio_in dout, struct gpio_out sclk, int num_bits)
 {
     uint32_t bits_read = 0;
     while (num_bits--) {
-        gpio_out_toggle_noirq(sclk);   // SCLK high
+        // Write PORTx explicitly instead of gpio_out_toggle_noirq(): on
+        // classic AVRs the PINx toggle trick is not reliable, which left
+        // SCLK static and the sensor returned zeros.
+        gpio_out_write(sclk, 1);       // SCLK high
         asm("nop\n    nop");
         bits_read <<= 1;
-        gpio_out_toggle_noirq(sclk);   // SCLK low (bit is shifted out)
+        gpio_out_write(sclk, 0);       // SCLK low (bit is shifted out)
         asm("nop\n    nop");
         if (gpio_in_read(dout))
             bits_read |= 1;
@@ -75,9 +78,9 @@ static void
 hx71x_gain_pulses(struct gpio_out sclk, int count)
 {
     while (count--) {
-        gpio_out_toggle_noirq(sclk);
+        gpio_out_write(sclk, 1);
         asm("nop\n    nop");
-        gpio_out_toggle_noirq(sclk);
+        gpio_out_write(sclk, 0);
         asm("nop\n    nop");
     }
 }
