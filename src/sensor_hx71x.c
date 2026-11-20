@@ -56,8 +56,14 @@ static void
 hx71x_delay_noirq(void)
 {
     if (CONFIG_MACH_AVR) {
-        // Optimize avr, as calculating time takes longer than needed delay
-        asm("nop\n    nop");
+        // The HX711 modules on the Maestro toolheads need a longer SCLK
+        // high level than the 200ns minimum.  With only two nops the chip
+        // did not shift any data out: DOUT stayed low ("data ready"
+        // forever), the MCU sampled at the timer rate (~92 sps) and every
+        // sample read back as zero.  The stock Arduino sketch holds SCLK
+        // high for roughly 0.5us (two nops plus the shift), which works.
+        asm("nop\n    nop\n    nop\n    nop\n"
+            "nop\n    nop\n    nop\n    nop");
         return;
     }
     uint32_t end = timer_read_time() + MIN_PULSE_TIME;
@@ -87,6 +93,10 @@ hx71x_raw_read(struct gpio_in dout, struct gpio_out sclk, int num_bits)
         gpio_out_toggle_noirq(sclk);
         hx71x_delay_noirq();
         gpio_out_toggle_noirq(sclk);
+        if (CONFIG_MACH_AVR)
+            // Let DOUT settle after the falling edge, like the stock
+            // sketch does; reading immediately sampled the stale level.
+            asm("nop\n    nop");
         uint_fast8_t bit = gpio_in_read(dout);
         irq_enable();
         hx71x_delay();
