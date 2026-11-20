@@ -70,10 +70,15 @@ class HostPower:
 
         # Register G-Code commands
         gcode = self.printer.lookup_object('gcode')
-        gcode.register_command("M80", self.cmd_M80, desc="Turn on 24V power supply")
+        # when_not_ready=True keeps the power-on commands usable in the
+        # shutdown state: M81 cuts the boards' supply, Klipper then goes to
+        # shutdown, and without this M80 could not bring the printer back.
+        gcode.register_command("M80", self.cmd_M80, when_not_ready=True,
+                               desc="Turn on 24V power supply")
         gcode.register_command("M81", self.cmd_M81, desc="Turn off 24V power supply")
         gcode.register_command(
-            "HOST_POWER_ON", self.cmd_M80, desc="Turn on 24V power supply"
+            "HOST_POWER_ON", self.cmd_M80, when_not_ready=True,
+            desc="Turn on 24V power supply"
         )
         gcode.register_command(
             "HOST_POWER_OFF", self.cmd_M81, desc="Turn off 24V power supply"
