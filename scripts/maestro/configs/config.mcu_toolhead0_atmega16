@@ -19,6 +19,9 @@ CONFIG_HAVE_GPIO=y
 CONFIG_HAVE_GPIO_ADC=y
 CONFIG_HAVE_STRICT_TIMING=y
 CONFIG_WANT_ADC=y
+# Toolheads have a single ADC consumer; the ADC timer clamp is only
+# needed where several channels share the converter (saves flash).
+CONFIG_ADC_TIMER_CLAMP=n
 # Fan state before Klipper connects: hotend fan (PD4) on, part fan (PD5)
 # forced off, so the hotend is cooled from power-up instead of the part
 # cooling fan spinning on a floating pin.

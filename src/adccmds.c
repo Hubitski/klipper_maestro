@@ -34,7 +34,10 @@ static struct task_wake analog_wake;
 // several ADC channels one channel can be starved while another conversion
 // is in progress; blindly adding the retry delay to a stale waketime made
 // the timer fire with a waketime in the past forever (interrupt storm,
-// watchdog reset, host sees "Lost communication").
+// watchdog reset, host sees "Lost communication").  On tiny MCUs with a
+// single ADC channel this cannot happen, so the clamp can be compiled out
+// to save flash (CONFIG_ADC_TIMER_CLAMP=n).
+#if CONFIG_ADC_TIMER_CLAMP
 static uint32_t
 analog_clamp_waketime(uint32_t waketime, uint32_t add)
 {
@@ -43,6 +46,10 @@ analog_clamp_waketime(uint32_t waketime, uint32_t add)
         waketime = now;
     return waketime + add;
 }
+#define ADC_TIMER_NEXT(waketime, add) analog_clamp_waketime(waketime, add)
+#else
+#define ADC_TIMER_NEXT(waketime, add) ((waketime) + (add))
+#endif
 
 static uint_fast8_t
 analog_in_event(struct timer *timer)
@@ -50,8 +57,7 @@ analog_in_event(struct timer *timer)
     struct analog_in *a = container_of(timer, struct analog_in, timer);
     uint32_t sample_delay = gpio_adc_sample(a->pin);
     if (sample_delay) {
-        a->timer.waketime = analog_clamp_waketime(a->timer.waketime,
-                                                  sample_delay);
+        a->timer.waketime = ADC_TIMER_NEXT(a->timer.waketime, sample_delay);
         return SF_RESCHEDULE;
     }
     uint16_t value = gpio_adc_read(a->pin);
@@ -64,8 +70,7 @@ analog_in_event(struct timer *timer)
     a->value = value;
     a->state = state+1;
     if (a->state < a->sample_count) {
-        a->timer.waketime = analog_clamp_waketime(a->timer.waketime,
-                                                  a->sample_time);
+        a->timer.waketime = ADC_TIMER_NEXT(a->timer.waketime, a->sample_time);
         return SF_RESCHEDULE;
     }
     if (likely(a->value >= a->min_value && a->value <= a->max_value)) {

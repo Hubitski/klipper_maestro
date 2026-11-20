@@ -252,6 +252,16 @@ config INLINE_STEPPER_HACK
 config WANT_ADC
     bool "Support micro-controller based ADC (analog to digital)"
     depends on HAVE_GPIO_ADC
+config ADC_TIMER_CLAMP
+    bool "Never reschedule an ADC timer into the past"
+    depends on WANT_ADC
+    default y
+    help
+        With several ADC channels sharing one converter a starved channel
+        can keep rescheduling its timer with a waketime in the past; on AVR
+        that shuts the MCU down ("Rescheduled timer in the past") and the
+        host sees a lost communication.  Enable this on MCUs with more than
+        one active ADC channel.  Disable it on tiny MCUs to save flash.
 config WANT_SPI
     bool "Support communicating with external chips via SPI bus"
     depends on HAVE_GPIO && HAVE_GPIO_SPI
