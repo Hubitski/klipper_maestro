@@ -205,7 +205,11 @@ class MCU_trsync:
             "trsync_trigger oid=%c reason=%c",
             "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u",
             oid=self._oid, cq=self._cmd_queue)
-        self._stepper_stop_cmd = mcu.lookup_command(
+        # Not every MCU that hosts a trsync also hosts steppers (e.g. the
+        # load cell probe's trsync lives on the toolhead MCU while the Z
+        # steppers are on the motherboard).  Only require the command when
+        # this trsync actually has steppers attached; see start().
+        self._stepper_stop_cmd = mcu.try_lookup_command(
             "stepper_stop_on_trigger oid=%c trsync_oid=%c", cq=self._cmd_queue)
         # Create trdispatch_mcu object
         set_timeout_tag = mcu.lookup_command(
@@ -258,6 +262,10 @@ class MCU_trsync:
             self._oid)
         self._trsync_start_cmd.send([self._oid, report_clock, report_ticks,
                                      self.REASON_COMMS_TIMEOUT], reqclock=clock)
+        if self._steppers and self._stepper_stop_cmd is None:
+            raise self._mcu.get_printer().command_error(
+                "MCU '%s' does not support stepper_stop_on_trigger"
+                % (self._mcu.get_name(),))
         for s in self._steppers:
             self._stepper_stop_cmd.send([s.get_oid(), self._oid])
         self._trsync_set_timeout_cmd.send([self._oid, expire_clock],
@@ -1202,9 +1210,9 @@ class MCU:
                              cq=None, is_async=False):
         return CommandQueryWrapper(self._conn_helper, msgformat, respformat,
                                    oid, cq, is_async)
-    def try_lookup_command(self, msgformat):
+    def try_lookup_command(self, msgformat, cq=None):
         try:
-            return self.lookup_command(msgformat)
+            return self.lookup_command(msgformat, cq)
         except self._serial.get_msgparser().error as e:
             return None
     def alloc_command_queue(self):
