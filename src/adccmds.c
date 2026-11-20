@@ -78,8 +78,7 @@ analog_in_event(struct timer *timer)
         }
     }
     sched_wake_task(&analog_wake);
-    a->next_begin_time = analog_clamp_waketime(a->next_begin_time,
-                                               a->rest_time);
+    a->next_begin_time += a->rest_time;
     a->timer.waketime = a->next_begin_time;
     return SF_RESCHEDULE;
 }
