@@ -158,7 +158,16 @@ HX711. Новая (16212 Б, `eb0361b`) лежит в `firmware/` и в
   (коммит `2bbc6c0`).
 - `klippy/extras/host_power.py`: обязательный путь отключения, проверка
   GPIO read-back, ошибки не проглатываются, `off_on_disconnect=False`
-  (коммит `7458ce9`).
+  (коммит `7458ce9`). `M80`/`HOST_POWER_ON` регистрируются с
+  `when_not_ready=True`, чтобы после `M81` (снимает 24 В и роняет MCU)
+  питание можно было вернуть из интерфейса (коммит `a5c111b`).
+- `klippy/mcu.py`: **MCU, оставшийся сконфигурированным при обычном старте
+  хоста, больше не используется в «быстром пути»** — вместо init-команд
+  хост запрашивает цикл `firmware_restart` (сброс всех MCU и полная
+  переконфигурация). Это лечит плавающий «MCU 'head0' shutdown: Invalid
+  oid type» при рестартах: старая OID-таблица не совпадала с новой
+  нумерацией (падало на `spi_send oid=0` при инициализации TMC экструдера)
+  (коммит `99bbea9`).
 
 ## 6. Патчи прошивки
 
@@ -256,19 +265,21 @@ HX711. Новая (16212 Б, `eb0361b`) лежит в `firmware/` и в
    цель от USB; перед прошивкой проверить 5 В на плате. Для стола не
    подавать 24 В нагревателя; достаточно 5 В логики. Если VCC нет —
    подать 5 В от лабораторного/принтерного БП (24 В выключено).
-10. **Рестарт Klipper на этой шине — осторожно.** `systemctl restart
-    klipper` **не сбрасывает MCU**: событие `klipper:firmware_restart`
-    бывает только при команде `FIRMWARE_RESTART`. Проверено 2026-11-20:
-    после рестарта head0 продолжал старый поток `sensor_bulk_data`,
-    затем ушёл в `MCU 'head0' shutdown: Invalid oid type`; `host_power`
-    штатно снял 24 В. Отдельно: `host` — постоянный root-сервис
-    `klipper-mcu.service`; после аварии он остаётся в shutdown и следующий
-    старт падает с `Can not update MCU 'host' config as it is shutdown`.
-    Безопасный порядок восстановления:
-    `systemctl stop klipper` → `systemctl restart klipper-mcu.service` →
-    power-cycle реле (`echo 0/1 > /sys/class/gpio/gpio6/value`) →
-    `systemctl start klipper`. Для плановых перезапусков использовать
-    `FIRMWARE_RESTART`, а не рестарт сервиса.
+10. **Рестарт Klipper — исправлено `99bbea9`.** Раньше `systemctl restart
+    klipper` не сбрасывал MCU, и head0 с уже загруженной OID-таблицей падал
+    с `MCU 'head0' shutdown: Invalid oid type` (первая же SPI-команда
+    TMC экструдера, `spi_send oid=0`); `host_power` штатно снимал 24 В.
+    Теперь хост при обычном старте, увидев сконфигурированный MCU,
+    принудительно прогоняет цикл `firmware_restart` (сброс всех MCU +
+    полная конфигурация). Проверено: 4 обычных `systemctl restart klipper`
+    подряд → `ready`, новых `Invalid oid type` нет.
+    Остаётся аварийный случай: `host` — постоянный root-сервис
+    `klipper-mcu.service`; если он уже был в shutdown (после жёсткой
+    аварии), старт падает с `Can not update MCU 'host' config as it is
+    shutdown`. Тогда: `systemctl stop klipper` →
+    `systemctl restart klipper-mcu.service` → при необходимости power-cycle
+    реле (`echo 0/1 > /sys/class/gpio/gpio6/value`) →
+    `systemctl start klipper`.
 
 ## 10. Правила работы
 
