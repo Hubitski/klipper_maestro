@@ -7,6 +7,7 @@
 #include "basecmd.h" // oid_alloc
 #include "board/gpio.h" // struct gpio_adc
 #include "board/irq.h" // irq_disable
+#include "board/misc.h" // timer_read_time
 #include "command.h" // DECL_COMMAND
 #include "sched.h" // DECL_TASK
 #include "trigger_analog.h" // trigger_analog_update
