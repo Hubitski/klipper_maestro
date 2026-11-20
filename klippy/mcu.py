@@ -697,6 +697,15 @@ class MCURestartHelper:
         raise error("Attempt MCU '%s' restart failed" % (self._name,))
     def check_restart_on_crc_mismatch(self):
         self._check_restart("CRC mismatch")
+    def check_restart_on_stale_config(self):
+        # A plain host start (service restart) finds the MCUs still
+        # configured from the previous session.  Their OID table cannot be
+        # trusted: on the Maestro multi-drop bus this has produced
+        # "Invalid oid type" faults when an init command used an OID from
+        # the new numbering (e.g. spi_send oid=0) while the MCU still had
+        # the old one.  Force a firmware restart cycle so every MCU is
+        # reset and fully reconfigured.
+        self._check_restart("MCU already configured")
     def check_restart_on_send_config(self):
         if self._restart_method == 'rpi_usb':
             # Only configure mcu after usb power reset
@@ -1077,6 +1086,7 @@ class MCUConfigHelper:
             if start_reason == 'firmware_restart':
                 raise error("Failed automated reset of MCU '%s'"
                             % (self._name,))
+            restart_helper.check_restart_on_stale_config()
             self._finalize_config()
             if self._config_crc != config_params['crc']:
                 restart_helper.check_restart_on_crc_mismatch()
