@@ -4,11 +4,13 @@
 
 Custom fork of **Klipper** firmware providing complete support for the unique distributed 4-microcontroller architecture of the **Maestro Grand 2 IDEX** industrial 3D printer (400×400×400 mm build volume, independent dual extruders, nozzle strain-gauge Z leveling).
 
-> **АКТУАЛЬНОЕ СОСТОЯНИЕ (2026-11-14):** см.
-> [maestro_revision/CURRENT_STATE_2026-11-14.md](maestro_revision/CURRENT_STATE_2026-11-14.md).
-> Там реальная распиновка, все найденные и исправленные дефекты, открытые
-> риски и пошаговый план первого запуска. Часть утверждений ниже устарела
-> (в частности «9.2 КБ Flash / 490 Б SRAM» и `/dev/ttyS0`).
+> **АКТУАЛЬНОЕ СОСТОЯНИЕ (2026-11-20):** см.
+> [maestro_revision/CURRENT_STATE_2026-11-20.md](maestro_revision/CURRENT_STATE_2026-11-20.md)
+> и [HANDOFF_2026-11-20.md](maestro_revision/HANDOFF_2026-11-20.md).
+> Klipper уже подключён к материнке, столу и head0 через мультиплексор
+> (state ready); открытые задачи и распиновка — в актуальном документе.
+> Часть утверждений ниже устарела (в частности «9.2 КБ Flash / 490 Б
+> SRAM» и `/dev/ttyS0`).
 
 ---
 
