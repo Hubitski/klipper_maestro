@@ -743,7 +743,12 @@ class MCURestartHelper:
             # Attempt reset via reset command
             logging.info("Attempting MCU '%s' reset command", self._name)
             self._reset_cmd.send()
-        self._reactor.pause(self._reactor.monotonic() + 0.015)
+        # The MCU resets through its watchdog (16ms on AVR) and the command
+        # must first travel over the multi-drop bus / multiplexer.  The
+        # upstream 15ms wait is too short here: the reconnect would see the
+        # peripheral still configured and abort with "Failed automated
+        # reset".  Give the command and the watchdog enough time.
+        self._reactor.pause(self._reactor.monotonic() + 0.250)
         self._disconnect()
     def _restart_rpi_usb(self):
         logging.info("Attempting MCU '%s' reset via rpi usb power", self._name)
