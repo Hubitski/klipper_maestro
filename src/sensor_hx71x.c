@@ -36,6 +36,13 @@ enum {
 #define SAMPLE_ERROR_DESYNC 1L << 31
 #define SAMPLE_ERROR_READ_TOO_LONG 1L << 30
 
+// The Maestro toolhead HX711 is never put into power-down.  The stock
+// Arduino sketch keeps PD_SCK low from power-up and reads real weight,
+// while Klipper's power-down/wake cycle on this board leaves the analog
+// side dead: conversions still run (~80/s) but every count reads back as
+// zero.  Set to 0 to restore the upstream power-down behaviour.
+#define HX71X_NO_POWERDOWN 1
+
 static struct task_wake wake_hx71x;
 
 
@@ -211,7 +218,9 @@ command_config_hx71x(uint32_t *args)
     hx71x->gain_channel = gain_channel;
     hx71x->dout = gpio_in_setup(args[2], 1);
     hx71x->sclk = gpio_out_setup(args[3], 0);
+#if !HX71X_NO_POWERDOWN
     gpio_out_write(hx71x->sclk, 1); // put chip in power down state
+#endif
 }
 DECL_COMMAND(command_config_hx71x, "config_hx71x oid=%c gain_channel=%c"
              " dout_pin=%u sclk_pin=%u");
@@ -239,11 +248,15 @@ command_query_hx71x(uint32_t *args)
     hx71x->rest_ticks = args[1];
     if (!hx71x->rest_ticks) {
         // End measurements
+#if !HX71X_NO_POWERDOWN
         gpio_out_write(hx71x->sclk, 1); // put chip in power down state
+#endif
         return;
     }
     // Start new measurements
+#if !HX71X_NO_POWERDOWN
     gpio_out_write(hx71x->sclk, 0); // wake chip from power down
+#endif
     sensor_bulk_reset(&hx71x->sb);
     irq_disable();
     hx71x->timer.waketime = timer_read_time() + hx71x->rest_ticks;
