@@ -241,7 +241,18 @@ class FixedFreqReader:
         # Clear local queue (free no longer needed memory)
         self.bulk_queue.clear_queue()
     def _update_clock(self, is_reset=False):
-        params = self.query_status_cmd.send([self.oid])
+        try:
+            params = self.query_status_cmd.send([self.oid])
+        except self.mcu.get_printer().command_error as e:
+            # The toolhead MCUs are polled multi-drop slaves: during probing
+            # the status reply can be delayed behind bulk reports and the
+            # retry window is exceeded.  A missed periodic clock update is
+            # harmless (the next one corrects it), but it must not shut the
+            # printer down.  The initial reset query stays strict.
+            if is_reset:
+                raise
+            logging.warning("bulk_sensor: sensor status query failed: %s", e)
+            return
         mcu_clock = self.mcu.clock32_to_clock64(params['clock'])
         seq_diff = (params['next_sequence'] - self.last_sequence) & 0xffff
         self.last_sequence += seq_diff
