@@ -50,66 +50,36 @@ static struct task_wake wake_hx71x;
  * Low-level bit-banging
  ****************************************************************/
 
-#define MIN_PULSE_TIME nsecs_to_ticks(200)
-
-static uint32_t
-nsecs_to_ticks(uint32_t ns)
-{
-    return timer_from_us(ns * 1000) / 1000000;
-}
-
-// Pause for 200ns
-static void
-hx71x_delay_noirq(void)
-{
-    if (CONFIG_MACH_AVR) {
-        // The HX711 modules on the Maestro toolheads need a longer SCLK
-        // high level than the 200ns minimum.  With only two nops the chip
-        // did not shift any data out: DOUT stayed low ("data ready"
-        // forever), the MCU sampled at the timer rate (~92 sps) and every
-        // sample read back as zero.  The stock Arduino sketch holds SCLK
-        // high for roughly 0.5us (two nops plus the shift), which works.
-        asm("nop\n    nop\n    nop\n    nop\n"
-            "nop\n    nop\n    nop\n    nop");
-        return;
-    }
-    uint32_t end = timer_read_time() + MIN_PULSE_TIME;
-    while (timer_is_before(timer_read_time(), end))
-        ;
-}
-
-// Pause for a minimum of 200ns
-static void
-hx71x_delay(void)
-{
-    if (CONFIG_MACH_AVR)
-        // Optimize avr, as calculating time takes longer than needed delay
-        return;
-    uint32_t end = timer_read_time() + MIN_PULSE_TIME;
-    while (timer_is_before(timer_read_time(), end))
-        irq_poll();
-}
-
-// Read 'num_bits' from the sensor
+// Read 'num_bits' from the sensor, matching the stock Arduino sketch
+// bit for bit: SCLK high, two nops, shift, SCLK low, two nops, read DOUT.
+// Interrupts stay enabled like in the sketch; the whole read is short.
 static uint32_t
 hx71x_raw_read(struct gpio_in dout, struct gpio_out sclk, int num_bits)
 {
     uint32_t bits_read = 0;
     while (num_bits--) {
-        irq_disable();
-        gpio_out_toggle_noirq(sclk);
-        hx71x_delay_noirq();
-        gpio_out_toggle_noirq(sclk);
-        if (CONFIG_MACH_AVR)
-            // Let DOUT settle after the falling edge, like the stock
-            // sketch does; reading immediately sampled the stale level.
-            asm("nop\n    nop");
-        uint_fast8_t bit = gpio_in_read(dout);
-        irq_enable();
-        hx71x_delay();
-        bits_read = (bits_read << 1) | bit;
+        gpio_out_toggle_noirq(sclk);   // SCLK high
+        asm("nop\n    nop");
+        bits_read <<= 1;
+        gpio_out_toggle_noirq(sclk);   // SCLK low (bit is shifted out)
+        asm("nop\n    nop");
+        if (gpio_in_read(dout))
+            bits_read |= 1;
     }
     return bits_read;
+}
+
+// Send 'count' gain/channel select pulses.  The stock sketch sends a
+// single extra pulse and does not read DOUT during it.
+static void
+hx71x_gain_pulses(struct gpio_out sclk, int count)
+{
+    while (count--) {
+        gpio_out_toggle_noirq(sclk);
+        asm("nop\n    nop");
+        gpio_out_toggle_noirq(sclk);
+        asm("nop\n    nop");
+    }
 }
 
 
@@ -164,9 +134,11 @@ add_sample(struct hx71x_adc *hx71x, uint8_t oid, uint32_t counts,
 static void
 hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
 {
-    // Read from sensor
+    // Read 24 data bits, then the gain/channel select pulses (the sketch
+    // sends one extra pulse and ignores it)
     uint_fast8_t gain_channel = hx71x->gain_channel;
-    uint32_t adc = hx71x_raw_read(hx71x->dout, hx71x->sclk, 24 + gain_channel);
+    uint32_t counts = hx71x_raw_read(hx71x->dout, hx71x->sclk, 24);
+    hx71x_gain_pulses(hx71x->sclk, gain_channel);
 
     // Clear pending flag (and note if an overflow occurred)
     irq_disable();
@@ -174,8 +146,7 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
     hx71x->flags = 0;
     irq_enable();
 
-    // Extract report from raw data
-    uint32_t counts = adc >> gain_channel;
+    // Sign-extend the 24 bit two's complement value
     if (counts & 0x800000)
         counts |= 0xFF000000;
 
