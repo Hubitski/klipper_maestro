@@ -6,7 +6,9 @@ CONFIG_MCU="atmega16"
 CONFIG_AVR_FREQ_16000000=y
 CONFIG_CLOCK_FREQ=16000000
 CONFIG_AVR_CLKPR=-1
-CONFIG_AVR_STACK_SIZE=256
+# 4 temperature sensors + 4 heater outputs left almost no heap on the
+# ATmega16A (move queue 271 -> 19); a 160 byte stack frees ~96 bytes.
+CONFIG_AVR_STACK_SIZE=160
 CONFIG_AVR_WATCHDOG=y
 CONFIG_SERIAL=y
 CONFIG_SERIAL_BAUD_U2X=y
