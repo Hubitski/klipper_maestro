@@ -114,6 +114,24 @@ serial_init(void)
 }
 DECL_INIT(serial_init);
 
+#if CONFIG_MACH_atmega1284p && CONFIG_SERIAL_PORT == 0 && !CONFIG_MAESTRO_ROUTER
+// The motherboard's USART1 is still wired to the peripheral-bus MCP2561 even
+// when the router is disabled (the host now drives that bus directly).  Keep
+// TXD1 idle high so the transceiver holds the bus recessive, and leave the
+// receiver and its interrupts off so the board neither drives nor consumes
+// bus traffic.
+static void
+serial1_idle_init(void)
+{
+    UCSR1A = (1 << U2X1);
+    UBRR1 = DIV_ROUND_CLOSEST(CONFIG_CLOCK_FREQ, 8 * CONFIG_SERIAL_BAUD) - 1UL;
+    UCSR1C = (1 << UCSZ11) | (1 << UCSZ10);
+    UCSR1B = (1 << TXEN1);
+}
+DECL_INIT(serial1_idle_init);
+DECL_CONSTANT_STR("RESERVE_PINS_serial1", "PD2,PD3");
+#endif
+
 // Rx interrupt - data available to be read.
 ISR(USARTx_RX_vect)
 {

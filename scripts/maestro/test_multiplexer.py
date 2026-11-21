@@ -8,6 +8,7 @@ and upstream demultiplexing.
 import unittest
 import sys
 import os
+import time
 
 # Add parent directory to path to import host_multiplexer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -274,6 +275,29 @@ class TestMaestroMultiplexer(unittest.TestCase):
         self.assertEqual(mux.bus_active_dest, 0x30)
         self.assertEqual(len(mux.bus_pending_queue), 0)
         self.assertEqual(bytes(mux.uart_tx_queue), pkt_head1_cmd)
+
+    def test_local_transceiver_echo_is_dropped(self):
+        from host_multiplexer import MaestroMultiplexer
+        mux = MaestroMultiplexer(channel_configs={})
+        pkt_req = self.make_packet(0x20, b"HEAD0_CMD")
+        pkt_resp = self.make_packet(0x20, b"TEMP")
+
+        # The exact frame just transmitted is dropped once.
+        mux.pending_echo = pkt_req
+        mux.pending_echo_time = time.monotonic()
+        self.assertTrue(mux._is_echo(pkt_req))
+        self.assertFalse(mux._is_echo(pkt_req))
+
+        # A real response is never mistaken for the echo.
+        mux.pending_echo = pkt_req
+        mux.pending_echo_time = time.monotonic()
+        self.assertFalse(mux._is_echo(pkt_resp))
+
+        # A stale echo arm expires instead of dropping a later real frame.
+        mux.pending_echo = pkt_req
+        mux.pending_echo_time = time.monotonic() - mux.echo_window - 1.0
+        self.assertFalse(mux._is_echo(pkt_req))
+        self.assertIsNone(mux.pending_echo)
 
 
 if __name__ == "__main__":

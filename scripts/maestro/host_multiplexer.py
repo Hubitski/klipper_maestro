@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
 """
-Maestro Grand 2 IDEX - Host Serial Proxy Multiplexer
-Part of Klipper port for Maestro Grand 2 3D printer.
+Maestro Grand 2 IDEX - Host serial multiplexer (direct-bus topology).
 
-This daemon runs on the host (Orange Pi Zero) and creates 4 virtual pseudo-terminals (PTY):
-  - /tmp/klipper_mcu_main  (Main MCU: ATmega1284p, DEST = 0x10)
-  - /tmp/klipper_mcu_head0 (Toolhead 0 MCU: ATmega16A, DEST = 0x20)
-  - /tmp/klipper_mcu_head1 (Toolhead 1 MCU: ATmega16A, DEST = 0x30)
-  - /tmp/klipper_mcu_bed   (Heated Bed MCU: ATmega16A, DEST = 0x40)
+Two independent physical links:
 
-All 4 virtual streams are multiplexed onto a single physical serial port (/dev/ttyS1)
-connected to the Motherboard ATmega1284p gateway router.
+  --main-port   /dev/ttyS1
+      Point-to-point link to the ATmega1284p USART0.  The motherboard runs
+      WITHOUT CONFIG_MAESTRO_ROUTER, so this is ordinary Klipper traffic and
+      is passed through byte for byte.
 
-Downstream (Klippy -> Physical UART):
-  - Packets from /tmp/klipper_mcu_head0 have their SEQ DEST field rewritten to 0x20,
-    CRC16 is recalculated, and the frame is transmitted to physical UART.
-  - Packets from /tmp/klipper_mcu_head1 are rewritten to 0x30 with CRC recalculated.
-  - Packets from /tmp/klipper_mcu_bed are rewritten to 0x40 with CRC recalculated.
-  - Packets from /tmp/klipper_mcu_main (0x10) pass through without rewriting.
+  --periph-port /dev/ttyS0
+      Local 3.3V CAN transceiver wired to the toolhead/bed multi-drop bus.
+      Creates /tmp/klipper_mcu_{head0,head1,bed}, rewrites the DEST field and
+      arbitrates the half-duplex bus.  The transceiver mirrors everything we
+      transmit back onto its RXD output, so the first received frame that is
+      byte-identical to our last request is dropped as local echo.
 
-Upstream (Physical UART -> Klippy):
-  - Packets from physical UART are demultiplexed by DEST ID in the SEQ byte:
-    - 0x10 -> forwarded to /tmp/klipper_mcu_main
-    - 0x20 -> DEST rewritten back to 0x10 (with CRC recalculated) -> /tmp/klipper_mcu_head0
-    - 0x30 -> DEST rewritten back to 0x10 (with CRC recalculated) -> /tmp/klipper_mcu_head1
-    - 0x40 -> DEST rewritten back to 0x10 (with CRC recalculated) -> /tmp/klipper_mcu_bed
-
-To Klippy, each MCU looks like a completely independent, standard point-to-point serial device.
+To Klippy each MCU still looks like a normal, independent serial device.
+The old single-port/router topology is not handled here; use the previous
+revision of this file if the router firmware is flashed back.
 """
 
 import os
@@ -73,6 +65,8 @@ NODE_DEST_MAP = {
 
 DEST_TO_NAME = {v: k for k, v in NODE_DEST_MAP.items()}
 VALID_DESTS = {0x10, 0x20, 0x30, 0x40}
+PERIPH_DESTS = {0x20, 0x30, 0x40}
+
 
 class KlipperPacketParser:
     """Stream parser for extracting framed Klipper messages using a resilient sliding window."""
@@ -143,9 +137,7 @@ class VirtualChannel:
         self.slave_fd: Optional[int] = None
         self.slave_name: str = ""
         self.parser = KlipperPacketParser(name=name)
-        self.tx_bytes = 0
         self.rx_bytes = 0
-        self.tx_packets = 0
         self.rx_packets = 0
 
     def open(self):
@@ -225,59 +217,94 @@ def rewrite_packet_dest(pkt: bytes, new_dest: int) -> bytes:
 
 
 class MaestroMultiplexer:
-    """Main multiplexer engine coordinating UART and PTYs."""
-    def __init__(self, serial_port: str, baud_rate: int, channel_configs: Dict[str, Tuple[int, str]]):
-        self.serial_port = serial_port
+    """Main multiplexer engine coordinating the two UARTs and the PTYs."""
+    def __init__(self, serial_port=None, baud_rate=250000, channel_configs=None,
+                 main_port=None, periph_port=None):
         self.baud_rate = baud_rate
-        self.channel_configs = channel_configs
+        self.channel_configs = channel_configs or {}
+        self.main_port = main_port
+        # serial_port is kept as an alias for periph_port for the unit tests.
+        self.periph_port = periph_port if periph_port is not None else serial_port
+
         self.channels: Dict[str, VirtualChannel] = {}
         self.fd_to_channel: Dict[int, VirtualChannel] = {}
         self.dest_to_channel: Dict[int, VirtualChannel] = {}
-        self.ser_dev = None
-        self.serial_fd: Optional[int] = None
-        self.uart_parser = KlipperPacketParser(name="UART")
-        self.running = False
+        self.fd_to_link: Dict[int, str] = {}
+
+        self.main_ser = None
+        self.main_fd: Optional[int] = None
+        self.periph_ser = None
+        self.periph_fd: Optional[int] = None
+
+        # Main link is raw passthrough, no frame parsing.
+        self.main_tx_queue = bytearray()
+
+        # Peripheral link.
+        self.uart_parser = KlipperPacketParser(name="periph",
+                                               allowed_dests=PERIPH_DESTS)
         self.uart_tx_queue = bytearray()
 
-        # Half-Duplex Multi-Drop Bus Arbiter for MCP2561 peripherals (0x20, 0x30, 0x40)
-        self.bus_busy: bool = False
-        self.bus_active_dest: int = 0
-        # Time when the request was fully written to the UART (None while the
-        # request is still sitting in uart_tx_queue).
+        # Half-Duplex Multi-Drop Bus Arbiter for the peripheral transceiver.
+        self.bus_busy = False
+        self.bus_active_dest = 0
         self.bus_tx_time: Optional[float] = None
-        # Time after which the bus may be released (set after response
-        # packets; the node may still be sending a trailing packet after its
-        # terminating ACK, so release only after a short silence).
         self.bus_release_time: Optional[float] = None
-        self.bus_timeout: float = 0.050  # response timeout after the request
-        self.bus_guard: float = 0.003    # silence required after the last packet
+        self.bus_timeout = 0.050   # response timeout after the request
+        self.bus_guard = 0.003     # silence required after the last packet
         self.bus_pending_queue = collections.deque()
 
-    def open_serial(self):
-        logging.info("Opening physical serial port %s at %d baud...", self.serial_port, self.baud_rate)
-        # Using pyserial guarantees accurate configuration of 250000 baud via Linux termios2
+        # Local transceiver echo of our own transmitted frame.
+        self.pending_echo: Optional[bytes] = None
+        self.pending_echo_time = 0.0
+        self.echo_window = 0.050
+
+        self.running = False
+
+    # ------------------------------------------------------------------ setup
+    def _open_serial(self, port: str):
+        logging.info("Opening %s at %d baud...", port, self.baud_rate)
+        # pyserial guarantees accurate 250000 baud via Linux termios2.
         try:
             import serial
-            self.ser_dev = serial.Serial(self.serial_port, baudrate=self.baud_rate, timeout=0)
-            self.ser_dev.reset_input_buffer()
-            self.ser_dev.reset_output_buffer()
-            self.serial_fd = self.ser_dev.fileno()
         except ImportError:
             logging.critical(
                 "pyserial is required for reliable 250000 baud support. "
                 "Install with: pip3 install pyserial"
             )
             raise SystemExit(1)
-
-        # Ensure non-blocking
-        flags = fcntl.fcntl(self.serial_fd, fcntl.F_GETFL)
-        fcntl.fcntl(self.serial_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-        logging.info("Physical serial port %s opened successfully (fd=%d)", self.serial_port, self.serial_fd)
+        try:
+            ser = serial.Serial(port, baudrate=self.baud_rate, timeout=0,
+                                exclusive=True)
+        except TypeError:
+            # Older pyserial without the exclusive argument.
+            ser = serial.Serial(port, baudrate=self.baud_rate, timeout=0)
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+        fd = ser.fileno()
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        return ser, fd
 
     def setup(self):
-        self.open_serial()
+        if self.main_port:
+            self.main_ser, self.main_fd = self._open_serial(self.main_port)
+            self.fd_to_link[self.main_fd] = 'main'
+        if self.periph_port:
+            self.periph_ser, self.periph_fd = self._open_serial(self.periph_port)
+            self.fd_to_link[self.periph_fd] = 'periph'
+        if self.main_fd is None and self.periph_fd is None:
+            logging.critical("No serial ports configured")
+            raise SystemExit(1)
+
         for name, (node_id, symlink_path) in self.channel_configs.items():
-            chan = VirtualChannel(name=name, node_id=node_id, symlink_path=symlink_path)
+            if node_id == DEFAULT_DEST and self.main_fd is None:
+                logging.warning("Skipping channel %s: no --main-port", name)
+                continue
+            if node_id != DEFAULT_DEST and self.periph_fd is None:
+                logging.warning("Skipping channel %s: no --periph-port", name)
+                continue
+            chan = VirtualChannel(name=name, node_id=node_id,
+                                  symlink_path=symlink_path)
             chan.open()
             self.channels[name] = chan
             self.fd_to_channel[chan.master_fd] = chan
@@ -290,97 +317,78 @@ class MaestroMultiplexer:
         self.channels.clear()
         self.fd_to_channel.clear()
         self.dest_to_channel.clear()
-        if self.ser_dev is not None:
-            try:
-                self.ser_dev.close()
-            except Exception:
-                pass
-            self.ser_dev = None
-            self.serial_fd = None
-        elif self.serial_fd is not None:
-            try:
-                os.close(self.serial_fd)
-            except OSError:
-                pass
-            self.serial_fd = None
+        for ser_attr in ('main_ser', 'periph_ser'):
+            ser = getattr(self, ser_attr)
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                setattr(self, ser_attr, None)
+        self.main_fd = None
+        self.periph_fd = None
+        self.fd_to_link.clear()
 
-    def handle_channel_hup(self, chan: VirtualChannel, poll: select.poll):
-        old_fd = chan.master_fd
-        if old_fd in self.fd_to_channel:
-            del self.fd_to_channel[old_fd]
-        chan.reopen(poll)
-        self.fd_to_channel[chan.master_fd] = chan
-        logging.info("Channel %s PTY reset and ready for new connection (new fd=%d)", chan.name, chan.master_fd)
-
+    # ------------------------------------------------------------- main loop
     def run(self):
         self.running = True
         poll = select.poll()
 
-        # Register physical UART
-        poll.register(self.serial_fd, select.POLLIN | select.POLLERR | select.POLLHUP)
-
-        # Register channel master FDs
+        for fd in self.fd_to_link:
+            poll.register(fd, select.POLLIN | select.POLLERR | select.POLLHUP)
         for chan in self.channels.values():
-            poll.register(chan.master_fd, select.POLLIN | select.POLLERR | select.POLLHUP)
+            poll.register(chan.master_fd,
+                          select.POLLIN | select.POLLERR | select.POLLHUP)
 
-        logging.info("Maestro Multiplexer active. Listening on all channels.")
-
+        logging.info("Maestro multiplexer active (main=%s periph=%s).",
+                     self.main_port, self.periph_port)
         last_stat_time = time.time()
 
         while self.running:
-            # Bus arbitration.  Never release the bus just because a 5-byte
-            # ACK was seen: the node may still be transmitting a trailing
-            # report.  Require BUS_GUARD seconds of silence after the last
-            # packet, or a response timeout if the node does not answer.
+            # Peripheral bus arbitration.  Release only after BUS_GUARD seconds
+            # of silence following the last packet, or on a response timeout.
             now = time.monotonic()
-            if self.bus_busy:
+            if self.periph_fd is not None and self.bus_busy:
                 if self.bus_release_time is not None:
                     if now >= self.bus_release_time and not self.uart_tx_queue:
-                        logging.debug(
-                            "Bus idle after response from 0x%02X, releasing",
-                            self.bus_active_dest)
-                        self.bus_busy = False
-                        self.bus_active_dest = 0
-                        self.bus_release_time = None
-                        self.bus_tx_time = None
-                        self._dispatch_next_bus_packet()
+                        logging.debug("Bus idle after response from 0x%02X",
+                                      self.bus_active_dest)
+                        self._release_bus()
                 elif (self.bus_tx_time is not None
                       and now - self.bus_tx_time > self.bus_timeout):
-                    logging.debug(
-                        "Bus timeout waiting for response from 0x%02X, releasing",
-                        self.bus_active_dest)
-                    self.bus_busy = False
-                    self.bus_active_dest = 0
-                    self.bus_release_time = None
-                    self.bus_tx_time = None
-                    self._dispatch_next_bus_packet()
+                    logging.debug("Bus timeout from 0x%02X, releasing",
+                                  self.bus_active_dest)
+                    self._release_bus()
 
-            # Adjust poll events for UART write if there is pending data
-            uart_events = select.POLLIN | select.POLLERR | select.POLLHUP
-            if self.uart_tx_queue:
-                uart_events |= select.POLLOUT
-            poll.register(self.serial_fd, uart_events)
+            if self.main_fd is not None:
+                events = select.POLLIN | select.POLLERR | select.POLLHUP
+                if self.main_tx_queue:
+                    events |= select.POLLOUT
+                poll.register(self.main_fd, events)
+            if self.periph_fd is not None:
+                events = select.POLLIN | select.POLLERR | select.POLLHUP
+                if self.uart_tx_queue:
+                    events |= select.POLLOUT
+                poll.register(self.periph_fd, events)
 
             try:
-                events = poll.poll(5) # 5ms timeout for responsive half-duplex arbitration
+                events = poll.poll(5)  # 5ms for responsive half-duplex handling
             except OSError as e:
                 if e.args[0] == errno.EINTR:
                     continue
                 raise
 
             for fd, event in events:
-                # 1. Event on Physical Serial Port
-                if fd == self.serial_fd:
+                link = self.fd_to_link.get(fd)
+                if link is not None:
                     if event & select.POLLIN:
-                        self.handle_serial_read()
+                        self.handle_serial_read(link)
                     if event & select.POLLOUT:
-                        self.handle_serial_write()
+                        self.handle_serial_write(link)
                     if event & (select.POLLERR | select.POLLHUP):
-                        logging.error("Error/HUP on physical serial port!")
+                        logging.error("Error/HUP on %s serial port!", link)
                         self.running = False
                         break
-
-                # 2. Event on Virtual PTY Master (from Klippy)
                 elif fd in self.fd_to_channel:
                     chan = self.fd_to_channel[fd]
                     if event & (select.POLLERR | select.POLLHUP):
@@ -389,33 +397,71 @@ class MaestroMultiplexer:
                     if event & select.POLLIN:
                         self.handle_channel_read(chan, poll)
 
-            # Periodic stats logging every 30 seconds
             now = time.time()
             if now - last_stat_time > 30.0:
                 last_stat_time = now
                 self.log_stats()
 
+    def _release_bus(self):
+        self.bus_busy = False
+        self.bus_active_dest = 0
+        self.bus_release_time = None
+        self.bus_tx_time = None
+        self._dispatch_next_bus_packet()
+
+    def _start_bus_packet(self, dest: int, pkt: bytes):
+        self.bus_busy = True
+        self.bus_active_dest = dest
+        self.bus_tx_time = None
+        self.bus_release_time = None
+        # Arm the echo filter with the exact frame we are about to put on the
+        # bus.  The transceiver mirrors it back; the node's real response can
+        # only arrive later and is a different frame.
+        self.pending_echo = pkt
+        self.pending_echo_time = time.monotonic()
+        self.uart_tx_queue.extend(pkt)
+        if self.periph_fd is not None:
+            self.handle_serial_write('periph')
+
     def _dispatch_next_bus_packet(self):
-        """Dispatches the next queued packet to the MCP2561 multi-drop bus."""
         if not self.bus_busy and self.bus_pending_queue:
             dest, pkt = self.bus_pending_queue.popleft()
-            self.bus_busy = True
-            self.bus_active_dest = dest
-            self.bus_tx_time = None
-            self.bus_release_time = None
-            self.uart_tx_queue.extend(pkt)
-            self.handle_serial_write()
+            self._start_bus_packet(dest, pkt)
 
-    def handle_serial_read(self):
+    def _is_echo(self, pkt: bytes) -> bool:
+        if self.pending_echo is None:
+            return False
+        if time.monotonic() - self.pending_echo_time > self.echo_window:
+            self.pending_echo = None
+            return False
+        if pkt == self.pending_echo:
+            self.pending_echo = None
+            return True
+        return False
+
+    # ------------------------------------------------------------ serial I/O
+    def handle_serial_read(self, link: str):
+        fd = self.main_fd if link == 'main' else self.periph_fd
         try:
-            data = os.read(self.serial_fd, 4096)
+            data = os.read(fd, 4096)
         except OSError as e:
             if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 return
-            logging.error("UART read error: %s", e)
+            logging.error("%s UART read error: %s", link, e)
+            return
+        if not data:
             return
 
-        if not data:
+        if link == 'main':
+            # Direct motherboard link: pass bytes through untouched.
+            chan = self.dest_to_channel.get(DEFAULT_DEST)
+            if chan is None:
+                return
+            try:
+                os.write(chan.master_fd, data)
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    logging.warning("Failed to write to main PTY: %s", e)
             return
 
         self.uart_parser.feed(data)
@@ -424,52 +470,60 @@ class MaestroMultiplexer:
             if pkt is None:
                 break
 
-            # Demultiplex packet by DEST ID in SEQ byte
-            dest = pkt[1] & 0xF0
-            target_chan = self.dest_to_channel.get(dest)
-
-            if target_chan is None:
-                # Unknown DEST, log warning
-                logging.warning("UART received packet with unknown DEST=0x%02X, len=%d", dest, len(pkt))
+            # Drop our own transceiver echo before treating the frame as a
+            # response from a peripheral node.
+            if self._is_echo(pkt):
+                logging.debug("Dropped local transceiver echo len=%d", len(pkt))
                 continue
 
-            # Any packet from the polled peripheral node keeps the bus.  The
-            # terminating ACK is not treated specially: an ISR can append a
-            # sensor report right after it, so release the bus only after a
-            # short period of silence (see the bus guard in run()).
+            dest = pkt[1] & 0xF0
+            target_chan = self.dest_to_channel.get(dest)
+            if target_chan is None:
+                logging.warning("Peripheral packet with unknown DEST=0x%02X",
+                                dest)
+                continue
+
+            # Keep the bus busy until a short silence follows the last packet.
             if self.bus_busy and dest == self.bus_active_dest:
                 self.bus_tx_time = time.monotonic()
                 self.bus_release_time = self.bus_tx_time + self.bus_guard
 
-            # Upstream rewrite: Klippy expects DEST = 0x10
-            if dest == DEFAULT_DEST:
-                out_pkt = pkt
-            else:
-                out_pkt = rewrite_packet_dest(pkt, new_dest=DEFAULT_DEST)
-
+            # Upstream rewrite: Klippy expects DEST = 0x10.
+            out_pkt = rewrite_packet_dest(pkt, new_dest=DEFAULT_DEST)
             try:
                 os.write(target_chan.master_fd, out_pkt)
-                target_chan.tx_packets += 1
-                target_chan.tx_bytes += len(out_pkt)
+                target_chan.rx_packets += 1
+                target_chan.rx_bytes += len(out_pkt)
             except OSError as e:
                 if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
-                    logging.warning("Failed to write to channel %s: %s", target_chan.name, e)
+                    logging.warning("Failed to write to channel %s: %s",
+                                    target_chan.name, e)
 
-    def handle_serial_write(self):
-        if not self.uart_tx_queue or self.serial_fd is None:
+    def handle_serial_write(self, link: str):
+        if link == 'main':
+            fd, queue = self.main_fd, self.main_tx_queue
+        else:
+            fd, queue = self.periph_fd, self.uart_tx_queue
+        if not queue or fd is None:
             return
         try:
-            written = os.write(self.serial_fd, self.uart_tx_queue)
-            del self.uart_tx_queue[:written]
+            written = os.write(fd, queue)
+            del queue[:written]
         except OSError as e:
             if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
-                logging.error("UART write error: %s", e)
-        # The response timeout starts only once the request has really been
-        # handed to the UART; with a backed-up queue the 50ms must not count
-        # from the moment the packet was enqueued.
-        if (not self.uart_tx_queue and self.bus_busy
+                logging.error("%s UART write error: %s", link, e)
+        if (link == 'periph' and not queue and self.bus_busy
                 and self.bus_tx_time is None and self.bus_release_time is None):
             self.bus_tx_time = time.monotonic()
+
+    def handle_channel_hup(self, chan: VirtualChannel, poll: select.poll):
+        old_fd = chan.master_fd
+        if old_fd in self.fd_to_channel:
+            del self.fd_to_channel[old_fd]
+        chan.reopen(poll)
+        self.fd_to_channel[chan.master_fd] = chan
+        logging.info("Channel %s PTY reset (new fd=%d)",
+                     chan.name, chan.master_fd)
 
     def handle_channel_read(self, chan: VirtualChannel, poll: select.poll):
         try:
@@ -477,68 +531,63 @@ class MaestroMultiplexer:
         except OSError as e:
             if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 return
-            if e.errno == errno.EIO: # PTY slave disconnected by client
+            if e.errno == errno.EIO:  # PTY slave disconnected by client
                 self.handle_channel_hup(chan, poll)
                 return
             logging.warning("Channel %s read error: %s", chan.name, e)
             return
-
         if not data:
             self.handle_channel_hup(chan, poll)
             return
 
+        if chan.node_id == DEFAULT_DEST:
+            # Main MCU: raw passthrough, no DEST rewriting.
+            self.main_tx_queue.extend(data)
+            self.handle_serial_write('main')
+            return
+
         chan.rx_bytes += len(data)
         chan.parser.feed(data)
-
         while True:
             pkt = chan.parser.next_packet()
             if pkt is None:
                 break
-
             chan.rx_packets += 1
-
-            # Downstream rewrite: Set node DEST ID
-            if chan.node_id == DEFAULT_DEST:
-                # Main MCU (0x10): connected locally on USART0, bypasses MCP2561 bus arbiter
-                self.uart_tx_queue.extend(pkt)
+            out_pkt = rewrite_packet_dest(pkt, new_dest=chan.node_id)
+            if not self.bus_busy:
+                self._start_bus_packet(chan.node_id, out_pkt)
             else:
-                out_pkt = rewrite_packet_dest(pkt, new_dest=chan.node_id)
-                # Peripheral node (0x20, 0x30, 0x40): route through half-duplex bus arbiter
-                if not self.bus_busy:
-                    self.bus_busy = True
-                    self.bus_active_dest = chan.node_id
-                    self.bus_tx_time = None
-                    self.bus_release_time = None
-                    self.uart_tx_queue.extend(out_pkt)
-                else:
-                    self.bus_pending_queue.append((chan.node_id, out_pkt))
-
-        # Trigger immediate flush if possible
-        if self.uart_tx_queue:
-            self.handle_serial_write()
+                self.bus_pending_queue.append((chan.node_id, out_pkt))
 
     def log_stats(self):
         stats = []
         for name, chan in self.channels.items():
-            stats.append(f"{name}[rx_pkt={chan.rx_packets}, tx_pkt={chan.tx_packets}]")
-        logging.info("STATS: %s | UART_TX_PENDING=%d", " ".join(stats), len(self.uart_tx_queue))
+            stats.append(f"{name}[rx_pkt={chan.rx_packets}]")
+        logging.info("STATS: %s | main_q=%d periph_q=%d",
+                     " ".join(stats), len(self.main_tx_queue),
+                     len(self.uart_tx_queue))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Maestro Grand 2 IDEX Klipper Serial Multiplexer")
-    parser.add_argument("--port", default="/dev/ttyS1", help="Physical serial port (default: /dev/ttyS1)")
-    parser.add_argument("--baud", type=int, default=250000, help="Physical baud rate (default: 250000)")
-    parser.add_argument("--main-path", default="/tmp/klipper_mcu_main", help="Symlink path for main MCU PTY")
-    parser.add_argument("--head0-path", default="/tmp/klipper_mcu_head0", help="Symlink path for head0 MCU PTY")
-    parser.add_argument("--head1-path", default="/tmp/klipper_mcu_head1", help="Symlink path for head1 MCU PTY")
-    parser.add_argument("--bed-path", default="/tmp/klipper_mcu_bed", help="Symlink path for bed MCU PTY")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose debug logging")
+    parser = argparse.ArgumentParser(
+        description="Maestro Grand 2 IDEX Klipper serial multiplexer")
+    parser.add_argument("--main-port", default=None,
+                        help="Motherboard UART, e.g. /dev/ttyS1")
+    parser.add_argument("--periph-port", default=None,
+                        help="Toolhead/bed bus UART, e.g. /dev/ttyS0")
+    parser.add_argument("--baud", type=int, default=250000)
+    parser.add_argument("--main-path", default="/tmp/klipper_mcu_main")
+    parser.add_argument("--head0-path", default="/tmp/klipper_mcu_head0")
+    parser.add_argument("--head1-path", default="/tmp/klipper_mcu_head1")
+    parser.add_argument("--bed-path", default="/tmp/klipper_mcu_bed")
+    parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
+    if not args.main_port and not args.periph_port:
+        parser.error("at least one of --main-port / --periph-port is required")
 
-    log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
-        level=log_level,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -550,7 +599,10 @@ def main():
         'bed': (NODE_DEST_MAP['bed'], args.bed_path),
     }
 
-    mux = MaestroMultiplexer(serial_port=args.port, baud_rate=args.baud, channel_configs=channel_configs)
+    mux = MaestroMultiplexer(channel_configs=channel_configs,
+                             main_port=args.main_port,
+                             periph_port=args.periph_port,
+                             baud_rate=args.baud)
 
     def sig_handler(signum, frame):
         logging.info("Caught signal %d, shutting down...", signum)

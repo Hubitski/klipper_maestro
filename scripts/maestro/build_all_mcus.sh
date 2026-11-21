@@ -16,7 +16,7 @@ cd "${KLIPPER_DIR}" || exit 1
 chmod +x "${KLIPPER_DIR}/scripts/"*.sh 2>/dev/null || true
 
 echo "=========================================================="
-echo " Building Klipper for Maestro Grand 2 IDEX (4 MCUs)"
+echo " Building Klipper for Maestro Grand 2 IDEX (4 MCUs + router rollback)"
 echo "=========================================================="
 
 build_target() {
@@ -71,10 +71,19 @@ build_target() {
     return 0
 }
 
-# 1. Motherboard (ATmega1284p, Router enabled, Node 0x10)
-build_target "Motherboard (ATmega1284p)" \
-    "${CONFIG_DIR}/config.mcu_motherboard_1284p" \
+# 1. Motherboard (ATmega1284p, direct host link, Node 0x10)
+#    New topology: the host drives the peripheral bus itself through a local
+#    CAN transceiver, so the motherboard runs without the USART0<->USART1
+#    router (USART1 is only held recessive by serial.c).
+build_target "Motherboard direct (ATmega1284p)" \
+    "${CONFIG_DIR}/config.mcu_motherboard_1284p_direct" \
     "${OUTPUT_DIR}/klipper_mcu_motherboard_1284p.hex" \
+    || BUILD_FAILURES=$((BUILD_FAILURES + 1))
+
+# 1b. Motherboard router build (rollback only)
+build_target "Motherboard router (ATmega1284p)" \
+    "${CONFIG_DIR}/config.mcu_motherboard_1284p" \
+    "${OUTPUT_DIR}/klipper_mcu_motherboard_1284p_router.hex" \
     || BUILD_FAILURES=$((BUILD_FAILURES + 1))
 
 # 2. Heated Bed (ATmega16A, Polled Slave, Node 0x40) - lightest build
@@ -98,11 +107,11 @@ build_target "Toolhead 1 Right (ATmega16A)" \
 echo ""
 echo "=========================================================="
 if [ "${BUILD_FAILURES}" -eq 0 ]; then
-    echo " All 4 firmware binaries built successfully!"
+    echo " All 5 firmware binaries built successfully!"
     echo " Location: ${OUTPUT_DIR}/"
     ls -lh "${OUTPUT_DIR}"/*.hex
 else
-    echo " RESULT: ${BUILD_FAILURES} of 4 builds FAILED (see size reports above)."
+    echo " RESULT: ${BUILD_FAILURES} of 5 builds FAILED (see size reports above)."
     echo " Firmware directory: ${OUTPUT_DIR}/"
 fi
 echo "=========================================================="

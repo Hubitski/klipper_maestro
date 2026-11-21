@@ -13,13 +13,16 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 User=klipper
-# Physical UART wired to the ATmega1284p motherboard on the Orange Pi Zero.
-# /dev/ttyS0 is the kernel serial console on this board, the printer bus is
-# ttyS1 (this matches the stock Maestro printer.cfg).
-Environment=SERIAL_PORT=/dev/ttyS1
+# Direct-bus topology (motherboard runs WITHOUT CONFIG_MAESTRO_ROUTER):
+#   /dev/ttyS1 - point-to-point link to the ATmega1284p USART0
+#   /dev/ttyS0 - local 3.3V CAN transceiver on the toolhead/bed bus
+# The kernel console and serial getty must be disabled on ttyS0 first
+# (console=display in /boot/armbianEnv.txt, serial-getty@ttyS0 masked).
+Environment=MAIN_PORT=/dev/ttyS1
+Environment=PERIPH_PORT=/dev/ttyS0
 Environment=SERIAL_BAUD=250000
 # Use Klipper's virtualenv: it provides pyserial (the system python3 does not).
-ExecStart=/home/klipper/klippy-env/bin/python /home/klipper/klipper/scripts/maestro/host_multiplexer.py --port ${SERIAL_PORT} --baud ${SERIAL_BAUD}
+ExecStart=/home/klipper/klippy-env/bin/python /home/klipper/klipper/scripts/maestro/host_multiplexer.py --main-port ${MAIN_PORT} --periph-port ${PERIPH_PORT} --baud ${SERIAL_BAUD}
 Restart=always
 RestartSec=2
 KillMode=process
