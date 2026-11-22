@@ -77,6 +77,16 @@ class Heater:
             # No significant change in value - can suppress update
             return
         pwm_time = read_time + self.pwm_delay
+        # On a polled multi-drop bus the temperature sample can be older
+        # than pwm_delay, so pwm_time may already be in the past.  The MCU
+        # would then schedule the software-PWM timer in the past and shut
+        # down with "Timer too close".  Apply the update at the current
+        # print time plus a margin instead; the control loop corrects.
+        curtime = self.mcu_pwm.get_mcu().estimated_print_time(
+            self.printer.get_reactor().monotonic())
+        min_time = curtime + 0.100
+        if pwm_time < min_time:
+            pwm_time = min_time
         self.next_pwm_time = (pwm_time + MAX_HEAT_TIME
                               - (3. * self.pwm_delay + 0.001))
         self.last_pwm_value = value

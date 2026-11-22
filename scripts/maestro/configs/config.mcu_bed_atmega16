@@ -19,11 +19,6 @@ CONFIG_SERIAL_PORT=0
 CONFIG_SERIAL_BAUD=250000
 CONFIG_SERIAL_NODE_ID=0x40
 CONFIG_SERIAL_POLLED_SLAVE=y
-# Four bed ADC reports (~15 B each) are queued between host polls; 64 B
-# could not hold them plus the 5-byte ACK, so the ACK was dropped and the
-# host declared the bed lost.  The bed has no steppers, so this RAM is free.
-CONFIG_SERIAL_RX_BUFFER_SIZE=128
-CONFIG_SERIAL_TX_BUFFER_SIZE=128
 CONFIG_HAVE_LIMITED_CODE_SIZE=y
 CONFIG_HAVE_GPIO=y
 CONFIG_HAVE_GPIO_ADC=y

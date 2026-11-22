@@ -14,13 +14,28 @@
 #include "sched.h" // sched_wake_tasks
 #include "serial_irq.h" // serial_enable_tx_irq
 
-#define RX_BUFFER_SIZE CONFIG_SERIAL_RX_BUFFER_SIZE
+#if CONFIG_HAVE_LIMITED_CODE_SIZE && CONFIG_SERIAL_POLLED_SLAVE
+#if CONFIG_WANT_STEPPER
+// Toolhead: one max-size block each way.  TX must hold the 3-sample HX711
+// report + status/trigger response + ACK.
+#define RX_BUFFER_SIZE 64
+#define TX_BUFFER_SIZE 64
+#else
+// Bed (no steppers): four ~15-byte analog_in_state reports are queued
+// between host polls, and 64 bytes could not hold them plus the 5-byte
+// ACK.  The move queue is unused here, so the RAM is free.
+#define RX_BUFFER_SIZE 128
+#define TX_BUFFER_SIZE 128
+#endif
+#elif CONFIG_HAVE_LIMITED_CODE_SIZE
+#define RX_BUFFER_SIZE 96
+#define TX_BUFFER_SIZE 64
+#else
+#define RX_BUFFER_SIZE 192
+#define TX_BUFFER_SIZE 96
+#endif
 static uint8_t receive_buf[RX_BUFFER_SIZE], receive_pos;
-// TX must hold the pending async reports plus the terminating ACK.  The
-// size is per-build: the toolheads use 64 (3-sample HX711 reports), the
-// bed uses 128 (four ADC reports + ACK), the main board keeps 96.
-static uint8_t transmit_buf[CONFIG_SERIAL_TX_BUFFER_SIZE], transmit_pos
-    , transmit_max;
+static uint8_t transmit_buf[TX_BUFFER_SIZE], transmit_pos, transmit_max;
 
 DECL_CONSTANT("SERIAL_BAUD", CONFIG_SERIAL_BAUD);
 DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);
