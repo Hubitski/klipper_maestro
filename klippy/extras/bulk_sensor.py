@@ -205,13 +205,16 @@ MAX_BULK_MSG_SIZE = 51
 # Read sensor_bulk_data and calculate timestamps for devices that take
 # samples at a fixed frequency (and produce fixed data size samples).
 class FixedFreqReader:
-    def __init__(self, mcu, chip_clock_smooth, unpack_fmt):
+    def __init__(self, mcu, chip_clock_smooth, unpack_fmt,
+                 samples_per_block=None):
         self.mcu = mcu
         self.clock_sync = ClockSyncRegression(mcu, chip_clock_smooth)
         unpack = struct.Struct(unpack_fmt)
         self.unpack_from = unpack.unpack_from
         self.bytes_per_sample = unpack.size
-        self.samples_per_block = MAX_BULK_MSG_SIZE // self.bytes_per_sample
+        if samples_per_block is None:
+            samples_per_block = MAX_BULK_MSG_SIZE // self.bytes_per_sample
+        self.samples_per_block = samples_per_block
         self.last_sequence = self.max_query_duration = 0
         self.last_overflows = 0
         self.bulk_queue = self.oid = self.query_status_cmd = None
@@ -248,8 +251,9 @@ class FixedFreqReader:
             # the status reply can be delayed behind bulk reports and the
             # retry window is exceeded.  A missed periodic clock update is
             # harmless (the next one corrects it), but it must not shut the
-            # printer down.  The initial reset query stays strict.
-            if is_reset:
+            # printer down.  The initial reset query stays strict, and a real
+            # MCU shutdown must never be treated as a missed status update.
+            if is_reset or self.mcu.get_printer().is_shutdown():
                 raise
             logging.warning("bulk_sensor: sensor status query failed: %s", e)
             return

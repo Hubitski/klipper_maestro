@@ -221,6 +221,18 @@ config NEED_SENSOR_BULK
         || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X \
         || WANT_LDC1612 || WANT_SENSOR_ANGLE
     default y
+config SENSOR_BULK_DATA_SIZE
+    int "Bulk sensor data buffer size (bytes)"
+    depends on NEED_SENSOR_BULK
+    default 51
+    help
+        Size of the per-sensor sensor_bulk data buffer.  Must be a
+        multiple of the sample size (4 bytes for the HX711).  The 16KB
+        toolheads set 12 (3 samples): a 19-byte sensor_bulk_data frame
+        then leaves room for the status/trigger/ACK messages in the
+        64-byte polled-slave TX buffer.  The host's
+        FixedFreqReader.samples_per_block must match (see
+        klippy/extras/hx71x.py).
 config WANT_TRIGGER_ANALOG
     bool
     depends on WANT_ADC || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 \

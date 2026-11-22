@@ -52,6 +52,11 @@ CONFIG_WANT_NEOPIXEL=n
 CONFIG_WANT_ST7920=n
 CONFIG_WANT_HD44780=n
 CONFIG_WANT_HX71X=y
+# 12 bytes = 3 HX711 samples per sensor_bulk_data frame (~19 bytes on the
+# wire).  A 58-byte (12-sample) frame did not leave room for the 17-byte
+# status response, so RetryAsyncCommand blocked the host reactor for 5s.
+# klippy/extras/hx71x.py SAMPLES_PER_BLOCK must stay in sync.
+CONFIG_SENSOR_BULK_DATA_SIZE=12
 CONFIG_WANT_CS1237=n
 CONFIG_WANT_TMCUART=n
 CONFIG_WANT_PULSE_COUNTER=n

@@ -1,10 +1,15 @@
 #ifndef __SENSOR_BULK_H
 #define __SENSOR_BULK_H
 
+#include "autoconf.h" // CONFIG_SENSOR_BULK_DATA_SIZE
+#ifndef CONFIG_SENSOR_BULK_DATA_SIZE
+#define CONFIG_SENSOR_BULK_DATA_SIZE 51
+#endif
+
 struct sensor_bulk {
     uint16_t sequence, possible_overflows;
     uint8_t data_count;
-    uint8_t data[51];
+    uint8_t data[CONFIG_SENSOR_BULK_DATA_SIZE];
 };
 
 void sensor_bulk_reset(struct sensor_bulk *sb);

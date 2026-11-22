@@ -9,10 +9,14 @@ from . import bulk_sensor
 #
 # Constants
 #
-# Batch reports every 50ms instead of 100ms.  At 80Hz this halves the
-# sensor_bulk_data payload (~30 bytes instead of ~58), leaving room for the
-# ACK and other responses in the 64-byte polled-slave TX buffer.
+# Host batch/status cadence (also the clock-smoothing horizon).  This does
+# not set the MCU report size: the MCU sends sensor_bulk_data when its
+# CONFIG_SENSOR_BULK_DATA_SIZE buffer fills.  The 16KB toolheads set that to
+# 12 bytes (3 samples), and SAMPLES_PER_BLOCK below must match.  Keeping the
+# status query at 50ms drains the 3-sample reports before three of them can
+# pile up in the 64-byte polled-slave TX buffer.
 UPDATE_INTERVAL = 0.05
+SAMPLES_PER_BLOCK = 3
 SAMPLE_ERROR_DESYNC = -0x80000000
 SAMPLE_ERROR_LONG_READ = 0x40000000
 
@@ -47,7 +51,8 @@ class HX71xBase:
                                                  default=default_gain))
         # Clock tracking
         chip_smooth = self.sps * UPDATE_INTERVAL * 2
-        self.ffreader = bulk_sensor.FixedFreqReader(mcu, chip_smooth, "<i")
+        self.ffreader = bulk_sensor.FixedFreqReader(
+            mcu, chip_smooth, "<i", samples_per_block=SAMPLES_PER_BLOCK)
         # Process messages in batches
         self.batch_bulk = bulk_sensor.BatchBulkHelper(
             self.printer, self._process_batch, self._start_measurements,
