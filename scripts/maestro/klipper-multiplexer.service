@@ -22,9 +22,9 @@ User=klipper
 Environment=PERIPH_PORT=/dev/ttyS0
 Environment=SERIAL_BAUD=250000
 # Silence required after the last packet before the bus is released.
-# The old MCU router timed this in firmware; 3ms is too tight for the
-# Python host arbiter when head0 is streaming HX711 data.
-Environment=BUS_GUARD=0.012
+# 12ms was tested and broke bed clocksync (Timer too close); keep the
+# original 3ms until the head0 bus lock-up is understood.
+Environment=BUS_GUARD=0.003
 Environment=BUS_TIMEOUT=0.050
 Environment=TAP_LOG=/home/klipper/printer_data/logs/maestro_bus.log
 # Use Klipper's virtualenv: it provides pyserial (the system python3 does not).
