@@ -47,17 +47,12 @@ analog_clamp_waketime(uint32_t waketime, uint32_t add)
     return waketime + add;
 }
 #define ADC_TIMER_NEXT(waketime, add) analog_clamp_waketime(waketime, add)
-#define ADC_TIMER_REPORT(waketime) analog_clamp_waketime((waketime), 0)
 #elif CONFIG_ADC_TIMER_CLAMP
-// Report-only clamp for the 16KB toolheads: inline it so the helper
-// function is not emitted, keeping the load-cell build inside flash.
+// Report-only clamp for the 16KB toolheads: the report path is clamped
+// inline below, so the helper function is not emitted.
 #define ADC_TIMER_NEXT(waketime, add) ((waketime) + (add))
-#define ADC_TIMER_REPORT(waketime) ({ \
-    uint32_t _adc_now = timer_read_time(); \
-    timer_is_before((waketime), _adc_now) ? _adc_now : (waketime); })
 #else
 #define ADC_TIMER_NEXT(waketime, add) ((waketime) + (add))
-#define ADC_TIMER_REPORT(waketime) (waketime)
 #endif
 
 static uint_fast8_t
@@ -95,7 +90,13 @@ analog_in_event(struct timer *timer)
     a->next_begin_time += a->rest_time;
     // A starved channel can push the next report slot into the past; the
     // ADC timer clamp must cover this report path too.
-    a->next_begin_time = ADC_TIMER_REPORT(a->next_begin_time);
+#if CONFIG_ADC_TIMER_CLAMP
+    {
+        uint32_t _adc_now = timer_read_time();
+        if (timer_is_before(a->next_begin_time, _adc_now))
+            a->next_begin_time = _adc_now;
+    }
+#endif
     a->timer.waketime = a->next_begin_time;
     return SF_RESCHEDULE;
 }
