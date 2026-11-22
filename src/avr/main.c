@@ -66,6 +66,22 @@ prescaler_init(void)
 }
 DECL_INIT(prescaler_init);
 
+// Pre-Klipper fan state on the ATmega16 toolheads.  The generic
+// CONFIG_INITIAL_PINS table costs ~44 bytes and does not fit the 16KB
+// flash; this is the same behavior: hotend fan (PD4) on so the hotend is
+// cooled from power-up, part fan (PD5) held off instead of spinning on a
+// floating gate.  The bed has WANT_STEPPER=n so its PD4/PD5 heater gates
+// are not touched.
+#if CONFIG_MACH_atmega16 && CONFIG_WANT_STEPPER
+static void
+toolhead_fans_init(void)
+{
+    DDRD |= (1 << PD4) | (1 << PD5);
+    PORTD = (PORTD & ~(1 << PD5)) | (1 << PD4);
+}
+DECL_INIT(toolhead_fans_init);
+#endif
+
 // Optimized crc16_ccitt for the avr processor
 uint16_t
 crc16_ccitt(uint8_t *buf, uint_fast8_t len)
