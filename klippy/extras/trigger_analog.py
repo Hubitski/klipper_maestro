@@ -389,7 +389,10 @@ class MCU_trigger_analog:
     def _start_polling(self):
         if self._poll_timer is None:
             now = self._reactor.monotonic()
-            self._poll_deadline = now + 10.
+            # LOAD_CELL_TEST_TAP allows up to 120s and a probing move can
+            # exceed 10s; polling must last for the whole operation.  The
+            # deadline is still a safety net if home_wait() is never called.
+            self._poll_deadline = now + 120.
             self._poll_timer = self._reactor.register_timer(
                 self._poll_event, now + self.POLL_INTERVAL)
 

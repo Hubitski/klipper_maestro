@@ -299,6 +299,31 @@ class TestMaestroMultiplexer(unittest.TestCase):
         self.assertFalse(mux._is_echo(pkt_req))
         self.assertIsNone(mux.pending_echo)
 
+    def test_ack_terminates_bus_transaction(self):
+        from host_multiplexer import MaestroMultiplexer, MESSAGE_MIN
+        mux = MaestroMultiplexer(channel_configs={})
+        mux.bus_busy = True
+        mux.bus_active_dest = 0x20
+        data_pkt = self.make_packet(0x20, b"BULK")
+        ack_pkt = self.make_packet(0x20, b"")
+        self.assertGreater(len(data_pkt), MESSAGE_MIN)
+
+        # A data block must not end the transaction.
+        mux._note_bus_packet(0x20, data_pkt)
+        self.assertIsNone(mux.bus_release_time)
+        # The terminating ACK does.
+        mux._note_bus_packet(0x20, ack_pkt)
+        self.assertIsNotNone(mux.bus_release_time)
+        # A partially received frame blocks the ACK release.
+        mux.bus_release_time = None
+        mux.uart_parser.buf.extend(b"\x05")
+        mux._note_bus_packet(0x20, ack_pkt)
+        self.assertIsNone(mux.bus_release_time)
+        # A packet for another node does not touch this transaction.
+        mux.uart_parser.buf.clear()
+        mux._note_bus_packet(0x30, ack_pkt)
+        self.assertIsNone(mux.bus_release_time)
+
 
 if __name__ == "__main__":
     unittest.main()

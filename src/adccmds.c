@@ -84,6 +84,9 @@ analog_in_event(struct timer *timer)
     }
     sched_wake_task(&analog_wake);
     a->next_begin_time += a->rest_time;
+    // A starved channel can push the next report slot into the past; the
+    // ADC timer clamp must cover this report path too.
+    a->next_begin_time = ADC_TIMER_NEXT(a->next_begin_time, 0);
     a->timer.waketime = a->next_begin_time;
     return SF_RESCHEDULE;
 }

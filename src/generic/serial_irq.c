@@ -117,6 +117,11 @@ DECL_TASK(console_task);
 void
 console_sendf(const struct command_encoder *ce, va_list args)
 {
+    // The polled-slave UDRE ISR advances transmit_pos concurrently.  Make
+    // the space check, rebase and publish atomic; otherwise a burst of
+    // sensor_bulk reports can duplicate/truncate a block, strand it, or
+    // leave RXEN disabled after a failed TXC handshake.
+    irqstatus_t flag = irq_save();
     // Verify space for message
     uint_fast8_t tpos = readb(&transmit_pos), tmax = readb(&transmit_max);
     if (tpos >= tmax) {
@@ -125,9 +130,11 @@ console_sendf(const struct command_encoder *ce, va_list args)
         writeb(&transmit_pos, 0);
     }
     if (tmax + READP(ce->max_size) > sizeof(transmit_buf)) {
-        if (tmax - tpos + READP(ce->min_size) > sizeof(transmit_buf))
+        if (tmax - tpos + READP(ce->min_size) > sizeof(transmit_buf)) {
             // Not enough space for message
+            irq_restore(flag);
             return;
+        }
         // Disable TX irq and move buffer
         writeb(&transmit_max, 0);
         tpos = readb(&transmit_pos);
@@ -144,12 +151,15 @@ console_sendf(const struct command_encoder *ce, va_list args)
     uint8_t *buf = &transmit_buf[tmax];
     uint_fast8_t msglen = command_encode_and_frame(
         buf, sizeof(transmit_buf) - tmax, ce, args);
-    if (!msglen)
+    if (!msglen) {
+        irq_restore(flag);
         return;
+    }
 
     // Start message transmit
     writeb(&transmit_max, tmax + msglen);
 #if !CONFIG_SERIAL_POLLED_SLAVE
     serial_enable_tx_irq();
 #endif
+    irq_restore(flag);
 }

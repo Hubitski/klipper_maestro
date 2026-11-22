@@ -118,14 +118,15 @@ DECL_INIT(serial_init);
 // With the router disabled the host drives the peripheral-bus transceiver
 // directly.  On this board the host is wired to the transceiver's TTL side,
 // i.e. to the same PD2/PD3 pins as USART1, so a driven TXD1 would fight the
-// host's level-shifted output.  Do not enable USART1 at all and leave both
-// pins as pure high-impedance inputs: no output driver, no pull-up.  The
-// transceiver's own TXD pull-up keeps the bus recessive when nobody drives.
+// host's level-shifted output.  Do not enable USART1.  Keep TXD1 as a weak
+// internal pull-up input (not a driver): if the transceiver's TXD is left
+// floating it can drift dominant and mask the whole bus.  The host's
+// level-shifted driver easily overrides a ~20-50k pull-up.
 void
 serial1_idle_init(void)
 {
     DDRD &= ~((1 << PD2) | (1 << PD3));
-    PORTD &= ~((1 << PD2) | (1 << PD3));
+    PORTD = (PORTD & ~(1 << PD2)) | (1 << PD3);
 }
 DECL_INIT(serial1_idle_init);
 DECL_CONSTANT_STR("RESERVE_PINS_serial1", "PD2,PD3");

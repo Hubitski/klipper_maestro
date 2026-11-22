@@ -151,6 +151,7 @@ class VirtualChannel:
         self.tap = tap
         self.parser = KlipperPacketParser(name=name, tap=tap,
                                           label="PTY:" + name)
+        self.tx_queue = bytearray()
         self.rx_bytes = 0
         self.rx_packets = 0
 
@@ -209,6 +210,7 @@ class VirtualChannel:
             except Exception:
                 pass
         self.close()
+        self.tx_queue.clear()
         self.parser = KlipperPacketParser(name=self.name, tap=self.tap,
                                           label="PTY:" + self.name)
         self.open()
@@ -240,6 +242,10 @@ class BusTap:
     """
     ICOUNT_FIELDS = ("cts", "dsr", "rng", "dcd", "rx", "tx",
                      "frame", "overrun", "parity", "brk", "buf_overrun")
+    # Linux struct serial_icounter_struct is 11 named counters plus
+    # int reserved[9] = 20 ints = 80 bytes.  The kernel copies the whole
+    # struct, so the ioctl buffer must be that large.
+    ICOUNT_STRUCT_INTS = 20
     TIOCGICOUNT = 0x545D
 
     def __init__(self, path):
@@ -345,12 +351,12 @@ class BusTap:
         if now - self.icount_time < 1.0:
             return
         self.icount_time = now
-        fmt = "I" * len(self.ICOUNT_FIELDS)
+        fmt = "I" * self.ICOUNT_STRUCT_INTS
         try:
             buf = bytearray(struct.pack(fmt,
-                             *([0] * len(self.ICOUNT_FIELDS))))
+                             *([0] * self.ICOUNT_STRUCT_INTS)))
             res = fcntl.ioctl(fd, self.TIOCGICOUNT, buf)
-            vals = struct.unpack(fmt, res)
+            vals = struct.unpack(fmt, res)[:len(self.ICOUNT_FIELDS)]
         except Exception:
             self.icount = None
             return
@@ -371,7 +377,7 @@ class MaestroMultiplexer:
     """Main multiplexer engine coordinating the two UARTs and the PTYs."""
     def __init__(self, serial_port=None, baud_rate=250000, channel_configs=None,
                  main_port=None, periph_port=None, tap=None,
-                 bus_guard=0.003, bus_timeout=0.050):
+                 bus_guard=0.003, bus_timeout=0.012):
         self.baud_rate = baud_rate
         self.channel_configs = channel_configs or {}
         self.tap = tap
@@ -403,8 +409,11 @@ class MaestroMultiplexer:
         self.bus_active_dest = 0
         self.bus_tx_time: Optional[float] = None
         self.bus_release_time: Optional[float] = None
-        self.bus_timeout = bus_timeout  # response timeout after the request
-        self.bus_guard = bus_guard      # silence required after the last packet
+        self.bus_timeout = bus_timeout  # inactivity timeout for a transaction
+        self.bus_guard = bus_guard      # delay after the terminating ACK
+        self.bus_hard_timeout = 0.200   # absolute wedge protection
+        self.bus_busy_since = None
+        self.bus_last_byte_time = 0.0
         self.bus_pending_queue = collections.deque()
 
         # Local transceiver echo of our own transmitted frame.
@@ -505,18 +514,32 @@ class MaestroMultiplexer:
             # of silence following the last packet, or on a response timeout.
             now = time.monotonic()
             if self.periph_fd is not None and self.bus_busy:
-                if self.bus_release_time is not None:
-                    if now >= self.bus_release_time and not self.uart_tx_queue:
-                        logging.debug("Bus idle after response from 0x%02X",
-                                      self.bus_active_dest)
-                        self._release_bus("idle after 0x%02X"
-                                          % (self.bus_active_dest,))
-                elif (self.bus_tx_time is not None
-                      and now - self.bus_tx_time > self.bus_timeout):
-                    logging.debug("Bus timeout from 0x%02X, releasing",
-                                  self.bus_active_dest)
-                    self._release_bus("timeout from 0x%02X"
+                if (self.bus_busy_since is not None
+                        and now - self.bus_busy_since > self.bus_hard_timeout):
+                    logging.warning("Bus hard watchdog from 0x%02X",
+                                    self.bus_active_dest)
+                    self._release_bus("hard watchdog from 0x%02X"
                                       % (self.bus_active_dest,))
+                elif (self.bus_release_time is not None
+                      and now >= self.bus_release_time
+                      and not self.uart_tx_queue
+                      and not self.uart_parser.buf):
+                    logging.debug("Bus idle after response from 0x%02X",
+                                  self.bus_active_dest)
+                    self._release_bus("idle after 0x%02X"
+                                      % (self.bus_active_dest,))
+                else:
+                    last_activity = self.bus_tx_time
+                    if (self.bus_last_byte_time
+                            and (last_activity is None
+                                 or self.bus_last_byte_time > last_activity)):
+                        last_activity = self.bus_last_byte_time
+                    if (last_activity is not None
+                            and now - last_activity > self.bus_timeout):
+                        logging.debug("Bus timeout from 0x%02X, releasing",
+                                      self.bus_active_dest)
+                        self._release_bus("timeout from 0x%02X"
+                                          % (self.bus_active_dest,))
 
             if self.main_fd is not None:
                 events = select.POLLIN | select.POLLERR | select.POLLHUP
@@ -528,6 +551,11 @@ class MaestroMultiplexer:
                 if self.uart_tx_queue:
                     events |= select.POLLOUT
                 poll.register(self.periph_fd, events)
+            for chan in self.channels.values():
+                events = select.POLLIN | select.POLLERR | select.POLLHUP
+                if chan.tx_queue:
+                    events |= select.POLLOUT
+                poll.register(chan.master_fd, events)
 
             try:
                 events = poll.poll(5)  # 5ms for responsive half-duplex handling
@@ -554,6 +582,8 @@ class MaestroMultiplexer:
                         continue
                     if event & select.POLLIN:
                         self.handle_channel_read(chan, poll)
+                    if event & select.POLLOUT:
+                        self._flush_pty(chan)
 
             if self.tap is not None:
                 self.tap.stall("BUS", self.uart_parser)
@@ -572,6 +602,9 @@ class MaestroMultiplexer:
         self.bus_active_dest = 0
         self.bus_release_time = None
         self.bus_tx_time = None
+        self.bus_busy_since = None
+        self.bus_last_byte_time = 0.0
+        self.pending_echo = None
         self._dispatch_next_bus_packet()
 
     def _start_bus_packet(self, dest: int, pkt: bytes):
@@ -579,6 +612,8 @@ class MaestroMultiplexer:
         self.bus_active_dest = dest
         self.bus_tx_time = None
         self.bus_release_time = None
+        self.bus_busy_since = time.monotonic()
+        self.bus_last_byte_time = 0.0
         # Arm the echo filter with the exact frame we are about to put on the
         # bus.  The transceiver mirrors it back; the node's real response can
         # only arrive later and is a different frame.
@@ -589,6 +624,21 @@ class MaestroMultiplexer:
         self.uart_tx_queue.extend(pkt)
         if self.periph_fd is not None:
             self.handle_serial_write('periph')
+
+    def _note_bus_packet(self, dest: int, pkt: bytes):
+        """Update the transaction state from a packet received on the bus."""
+        if not (self.bus_busy and dest == self.bus_active_dest):
+            return
+        now = time.monotonic()
+        self.bus_tx_time = now
+        self.bus_last_byte_time = now
+        if len(pkt) == MESSAGE_MIN and not self.uart_parser.buf:
+            # The polled slave appends its terminating ACK/NAK last.
+            self.bus_release_time = now + self.bus_guard
+        else:
+            # Data block: the burst is not finished.  Wait for the ACK or
+            # for the inactivity timeout; never release after a data block.
+            self.bus_release_time = None
 
     def _dispatch_next_bus_packet(self):
         if not self.bus_busy and self.bus_pending_queue:
@@ -618,17 +668,15 @@ class MaestroMultiplexer:
             return
         if not data:
             return
+        if link == 'periph':
+            self.bus_last_byte_time = time.monotonic()
 
         if link == 'main':
             # Direct motherboard link: pass bytes through untouched.
             chan = self.dest_to_channel.get(DEFAULT_DEST)
             if chan is None:
                 return
-            try:
-                os.write(chan.master_fd, data)
-            except OSError as e:
-                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
-                    logging.warning("Failed to write to main PTY: %s", e)
+            self._write_pty(chan, data)
             return
 
         self.uart_parser.feed(data)
@@ -654,21 +702,14 @@ class MaestroMultiplexer:
                                 dest)
                 continue
 
-            # Keep the bus busy until a short silence follows the last packet.
-            if self.bus_busy and dest == self.bus_active_dest:
-                self.bus_tx_time = time.monotonic()
-                self.bus_release_time = self.bus_tx_time + self.bus_guard
+            # Only the terminating ACK may end a polled transaction.
+            self._note_bus_packet(dest, pkt)
 
             # Upstream rewrite: Klippy expects DEST = 0x10.
             out_pkt = rewrite_packet_dest(pkt, new_dest=DEFAULT_DEST)
-            try:
-                os.write(target_chan.master_fd, out_pkt)
-                target_chan.rx_packets += 1
-                target_chan.rx_bytes += len(out_pkt)
-            except OSError as e:
-                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
-                    logging.warning("Failed to write to channel %s: %s",
-                                    target_chan.name, e)
+            self._write_pty(target_chan, out_pkt)
+            target_chan.rx_packets += 1
+            target_chan.rx_bytes += len(out_pkt)
 
     def handle_serial_write(self, link: str):
         if link == 'main':
@@ -683,9 +724,36 @@ class MaestroMultiplexer:
         except OSError as e:
             if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
                 logging.error("%s UART write error: %s", link, e)
+                queue.clear()
+                if link == 'periph':
+                    # Never leave the arbiter wedged on a broken write.
+                    self.pending_echo = None
+                    self.bus_busy = False
+                    self.bus_active_dest = 0
+                    self.bus_release_time = None
+                    self.bus_tx_time = None
+                    self.bus_busy_since = None
+                    self.bus_last_byte_time = 0.0
         if (link == 'periph' and not queue and self.bus_busy
                 and self.bus_tx_time is None and self.bus_release_time is None):
             self.bus_tx_time = time.monotonic()
+
+    def _flush_pty(self, chan: VirtualChannel):
+        if not chan.tx_queue or chan.master_fd is None:
+            return
+        try:
+            written = os.write(chan.master_fd, chan.tx_queue)
+            del chan.tx_queue[:written]
+        except OSError as e:
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return
+            logging.warning("Failed to write to channel %s: %s",
+                            chan.name, e)
+            chan.tx_queue.clear()
+
+    def _write_pty(self, chan: VirtualChannel, data: bytes):
+        chan.tx_queue.extend(data)
+        self._flush_pty(chan)
 
     def handle_channel_hup(self, chan: VirtualChannel, poll: select.poll):
         old_fd = chan.master_fd
@@ -755,8 +823,8 @@ def main():
                         help="Write a bus protocol/error tap log to this file")
     parser.add_argument("--bus-guard", type=float, default=0.003,
                         help="Silence (s) required before releasing the bus")
-    parser.add_argument("--bus-timeout", type=float, default=0.050,
-                        help="Response timeout (s) after a request")
+    parser.add_argument("--bus-timeout", type=float, default=0.012,
+                        help="Inactivity timeout (s) for a transaction")
     parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()

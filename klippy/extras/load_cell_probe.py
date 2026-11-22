@@ -232,8 +232,9 @@ class ContinuousTareFilterHelper:
         if self._active_design == gcmd_filter:
             return
         # update MCU filter from GCode command
-        design = self._active_design.design_filter(gcmd.error)
+        design = gcmd_filter.design_filter(gcmd.error)
         self._sos_filter.set_filter_design(design)
+        self._active_design = gcmd_filter
 
 
 # check results from the collector for errors and raise an exception is found
