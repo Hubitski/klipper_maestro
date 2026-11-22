@@ -19,10 +19,11 @@ CONFIG_HAVE_GPIO=y
 CONFIG_HAVE_GPIO_ADC=y
 CONFIG_HAVE_STRICT_TIMING=y
 CONFIG_WANT_ADC=y
-# Toolheads have a single ADC consumer; the ADC timer clamp is only
-# needed where several channels share the converter (saves flash).
+# The full clamp now reuses its helper on the report path (adccmds.c),
+# so it fits the 16KB toolhead after dropping INITIAL_PINS.  It covers
+# both the sample and report paths, not just the report slot.
 CONFIG_ADC_TIMER_CLAMP=y
-CONFIG_ADC_TIMER_CLAMP_REPORT_ONLY=y
+CONFIG_ADC_TIMER_CLAMP_REPORT_ONLY=n
 # INITIAL_PINS is intentionally not set: its table plus the setup loop is
 # the last 20 bytes that keep this toolhead image over the 16 KB flash
 # (the load-cell and ADC-clamp code are required).  Consequence: the fans

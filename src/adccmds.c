@@ -87,15 +87,22 @@ analog_in_event(struct timer *timer)
         }
     }
     sched_wake_task(&analog_wake);
-    a->next_begin_time += a->rest_time;
     // A starved channel can push the next report slot into the past; the
-    // ADC timer clamp must cover this report path too.
+    // ADC timer clamp must cover this report path too.  In full-clamp mode
+    // reuse the helper (clamp, then add the rest delay) instead of keeping
+    // a second copy of the clamp in this function - that duplicate costs
+    // the last few bytes the 16KB toolhead does not have.
+#if CONFIG_ADC_TIMER_CLAMP && !CONFIG_ADC_TIMER_CLAMP_REPORT_ONLY
+    a->next_begin_time = ADC_TIMER_NEXT(a->next_begin_time, a->rest_time);
+#else
+    a->next_begin_time += a->rest_time;
 #if CONFIG_ADC_TIMER_CLAMP
     {
         uint32_t _adc_now = timer_read_time();
         if (timer_is_before(a->next_begin_time, _adc_now))
             a->next_begin_time = _adc_now;
     }
+#endif
 #endif
     a->timer.waketime = a->next_begin_time;
     return SF_RESCHEDULE;
