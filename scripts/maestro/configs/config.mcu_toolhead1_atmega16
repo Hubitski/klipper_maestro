@@ -19,11 +19,12 @@ CONFIG_HAVE_GPIO=y
 CONFIG_HAVE_GPIO_ADC=y
 CONFIG_HAVE_STRICT_TIMING=y
 CONFIG_WANT_ADC=y
-# The full clamp now reuses its helper on the report path (adccmds.c),
-# so it fits the 16KB toolhead after dropping INITIAL_PINS.  It covers
-# both the sample and report paths, not just the report slot.
+# The toolhead has a single ADC channel; clamp the report path (which the
+# heater task can starve) and leave the short sample delays unclamped.
+# This frees the flash needed for the pre-Klipper hotend fan.  The bed
+# keeps the full clamp (several ADC channels).
 CONFIG_ADC_TIMER_CLAMP=y
-CONFIG_ADC_TIMER_CLAMP_REPORT_ONLY=n
+CONFIG_ADC_TIMER_CLAMP_REPORT_ONLY=y
 # Hotend fan (PD4) on / part fan (PD5) off before Klipper connects is
 # done by toolhead_fans_init() in src/avr/main.c: the generic
 # CONFIG_INITIAL_PINS table costs ~44 bytes and does not fit 16KB.
