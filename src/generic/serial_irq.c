@@ -14,21 +14,13 @@
 #include "sched.h" // sched_wake_tasks
 #include "serial_irq.h" // serial_enable_tx_irq
 
-#if CONFIG_HAVE_LIMITED_CODE_SIZE && CONFIG_SERIAL_POLLED_SLAVE
-#define RX_BUFFER_SIZE 64
+#define RX_BUFFER_SIZE CONFIG_SERIAL_RX_BUFFER_SIZE
 static uint8_t receive_buf[RX_BUFFER_SIZE], receive_pos;
-// TX must hold a full MESSAGE_MAX block: sensor_bulk reports (HX711 load
-// cell) and other responses can be up to 64 bytes long.
-static uint8_t transmit_buf[64], transmit_pos, transmit_max;
-#elif CONFIG_HAVE_LIMITED_CODE_SIZE
-#define RX_BUFFER_SIZE 96
-static uint8_t receive_buf[RX_BUFFER_SIZE], receive_pos;
-static uint8_t transmit_buf[64], transmit_pos, transmit_max;
-#else
-#define RX_BUFFER_SIZE 192
-static uint8_t receive_buf[RX_BUFFER_SIZE], receive_pos;
-static uint8_t transmit_buf[96], transmit_pos, transmit_max;
-#endif
+// TX must hold the pending async reports plus the terminating ACK.  The
+// size is per-build: the toolheads use 64 (3-sample HX711 reports), the
+// bed uses 128 (four ADC reports + ACK), the main board keeps 96.
+static uint8_t transmit_buf[CONFIG_SERIAL_TX_BUFFER_SIZE], transmit_pos
+    , transmit_max;
 
 DECL_CONSTANT("SERIAL_BAUD", CONFIG_SERIAL_BAUD);
 DECL_CONSTANT("RECEIVE_WINDOW", RX_BUFFER_SIZE);

@@ -146,7 +146,16 @@ command_queue_digital_out(uint32_t *args)
 {
     struct digital_out_s *d = oid_lookup(args[0], command_config_digital_out);
     struct digital_move *m = move_alloc();
-    uint32_t time = m->waketime = args[1];
+    // The host computes software-PWM times from a temperature sample
+    // (heaters.py: pwm_time = read_time + report_time).  On a polled
+    // multi-drop bus that sample can be older than report_time, making
+    // the requested clock already past; sched_add_timer() then shuts the
+    // MCU down with "Timer too close".  Apply a late PWM update now
+    // instead of stopping the printer; the heater loop corrects itself.
+    uint32_t time = args[1];
+    if (timer_is_before(time, timer_read_time()))
+        time = timer_read_time();
+    m->waketime = time;
     m->on_duration = args[2];
 
     irq_disable();

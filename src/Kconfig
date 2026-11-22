@@ -74,6 +74,26 @@ config SERIAL_POLLED_SLAVE
         it will only transmit onto the serial bus in direct response to valid
         packets addressed to its SERIAL_NODE_ID, preventing bus collisions.
 
+config SERIAL_RX_BUFFER_SIZE
+    depends on SERIAL
+    int "Serial receive buffer size (bytes)" if LOW_LEVEL_OPTIONS
+    default 192
+    help
+        Size of the serial receive ring buffer.  It is also advertised to
+        the host as RECEIVE_WINDOW.  The 16KB toolheads use 64 (one max
+        block); the bed has no steppers and can use a larger buffer so
+        several analog_in_state reports and the ACK fit.
+
+config SERIAL_TX_BUFFER_SIZE
+    depends on SERIAL
+    int "Serial transmit buffer size (bytes)" if LOW_LEVEL_OPTIONS
+    default 96
+    help
+        Size of the serial transmit buffer.  In polled-slave mode the
+        pending reports and the terminating ACK must all fit here.  The
+        bed uses 128 so four ADC reports plus the ACK fit; the toolheads
+        use 64 with 3-sample HX711 reports.
+
 # Generic configuration options for USB
 config USBSERIAL
     bool

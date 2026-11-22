@@ -8,7 +8,10 @@ CONFIG_CLOCK_FREQ=16000000
 CONFIG_AVR_CLKPR=-1
 # 4 temperature sensors + 4 heater outputs left almost no heap on the
 # ATmega16A (move queue 271 -> 19); a 160 byte stack frees ~96 bytes.
-CONFIG_AVR_STACK_SIZE=160
+# The bed has no steppers, so the move queue is unused.  Keep a safer
+# stack (upstream uses 256; the toolhead uses 192) and give the serial
+# buffers room for four analog_in_state reports plus the ACK.
+CONFIG_AVR_STACK_SIZE=192
 CONFIG_AVR_WATCHDOG=y
 CONFIG_SERIAL=y
 CONFIG_SERIAL_BAUD_U2X=y
@@ -16,6 +19,11 @@ CONFIG_SERIAL_PORT=0
 CONFIG_SERIAL_BAUD=250000
 CONFIG_SERIAL_NODE_ID=0x40
 CONFIG_SERIAL_POLLED_SLAVE=y
+# Four bed ADC reports (~15 B each) are queued between host polls; 64 B
+# could not hold them plus the 5-byte ACK, so the ACK was dropped and the
+# host declared the bed lost.  The bed has no steppers, so this RAM is free.
+CONFIG_SERIAL_RX_BUFFER_SIZE=128
+CONFIG_SERIAL_TX_BUFFER_SIZE=128
 CONFIG_HAVE_LIMITED_CODE_SIZE=y
 CONFIG_HAVE_GPIO=y
 CONFIG_HAVE_GPIO_ADC=y
