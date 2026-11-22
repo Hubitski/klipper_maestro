@@ -115,18 +115,17 @@ serial_init(void)
 DECL_INIT(serial_init);
 
 #if CONFIG_MACH_atmega1284p && CONFIG_SERIAL_PORT == 0 && !CONFIG_MAESTRO_ROUTER
-// The motherboard's USART1 is still wired to the peripheral-bus MCP2561 even
-// when the router is disabled (the host now drives that bus directly).  Keep
-// TXD1 idle high so the transceiver holds the bus recessive, and leave the
-// receiver and its interrupts off so the board neither drives nor consumes
-// bus traffic.
+// With the router disabled the host drives the peripheral-bus transceiver
+// directly.  On this board the host is wired to the transceiver's TTL side,
+// i.e. to the same PD2/PD3 pins as USART1, so a driven TXD1 would fight the
+// host's level-shifted output.  Do not enable USART1 at all: leave both pins
+// as inputs and use only the weak internal pull-up on TXD1 to keep the
+// transceiver recessive.  The host's driver can override it easily.
 static void
 serial1_idle_init(void)
 {
-    UCSR1A = (1 << U2X1);
-    UBRR1 = DIV_ROUND_CLOSEST(CONFIG_CLOCK_FREQ, 8 * CONFIG_SERIAL_BAUD) - 1UL;
-    UCSR1C = (1 << UCSZ11) | (1 << UCSZ10);
-    UCSR1B = (1 << TXEN1);
+    DDRD &= ~((1 << PD2) | (1 << PD3));
+    PORTD = (PORTD & ~(1 << PD2)) | (1 << PD3);
 }
 DECL_INIT(serial1_idle_init);
 DECL_CONSTANT_STR("RESERVE_PINS_serial1", "PD2,PD3");
