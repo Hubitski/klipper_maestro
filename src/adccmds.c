@@ -46,9 +46,15 @@ analog_clamp_waketime(uint32_t waketime, uint32_t add)
         waketime = now;
     return waketime + add;
 }
+#if CONFIG_ADC_TIMER_CLAMP_REPORT_ONLY
+#define ADC_TIMER_NEXT(waketime, add) ((waketime) + (add))
+#else
 #define ADC_TIMER_NEXT(waketime, add) analog_clamp_waketime(waketime, add)
+#endif
+#define ADC_TIMER_REPORT(waketime) analog_clamp_waketime((waketime), 0)
 #else
 #define ADC_TIMER_NEXT(waketime, add) ((waketime) + (add))
+#define ADC_TIMER_REPORT(waketime) (waketime)
 #endif
 
 static uint_fast8_t
@@ -86,7 +92,7 @@ analog_in_event(struct timer *timer)
     a->next_begin_time += a->rest_time;
     // A starved channel can push the next report slot into the past; the
     // ADC timer clamp must cover this report path too.
-    a->next_begin_time = ADC_TIMER_NEXT(a->next_begin_time, 0);
+    a->next_begin_time = ADC_TIMER_REPORT(a->next_begin_time);
     a->timer.waketime = a->next_begin_time;
     return SF_RESCHEDULE;
 }

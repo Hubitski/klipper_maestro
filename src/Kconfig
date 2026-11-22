@@ -262,6 +262,17 @@ config ADC_TIMER_CLAMP
         that shuts the MCU down ("Rescheduled timer in the past") and the
         host sees a lost communication.  Enable this on MCUs with more than
         one active ADC channel.  Disable it on tiny MCUs to save flash.
+
+config ADC_TIMER_CLAMP_REPORT_ONLY
+    bool "Clamp only the ADC report path (saves flash)"
+    depends on ADC_TIMER_CLAMP
+    default n
+    help
+        On the 16KB toolheads the full clamp does not fit together with
+        the load-cell code.  The report path (next_begin_time) is the one
+        that can fall into the past when the heater/PID task starves the
+        ADC task; clamp only that path and leave the short sample delays
+        unclamped.
 config WANT_SPI
     bool "Support communicating with external chips via SPI bus"
     depends on HAVE_GPIO && HAVE_GPIO_SPI
