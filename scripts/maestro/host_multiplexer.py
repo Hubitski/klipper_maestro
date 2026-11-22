@@ -271,7 +271,10 @@ class BusTap:
         if self.fh is None:
             return
         try:
-            self.fh.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+            now = time.time()
+            stamp = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+                     + ".%03d" % (int((now % 1) * 1000),))
+            self.fh.write("%s %s\n" % (stamp, msg))
         except Exception:
             pass
 
@@ -367,7 +370,8 @@ class BusTap:
 class MaestroMultiplexer:
     """Main multiplexer engine coordinating the two UARTs and the PTYs."""
     def __init__(self, serial_port=None, baud_rate=250000, channel_configs=None,
-                 main_port=None, periph_port=None, tap=None):
+                 main_port=None, periph_port=None, tap=None,
+                 bus_guard=0.003, bus_timeout=0.050):
         self.baud_rate = baud_rate
         self.channel_configs = channel_configs or {}
         self.tap = tap
@@ -399,8 +403,8 @@ class MaestroMultiplexer:
         self.bus_active_dest = 0
         self.bus_tx_time: Optional[float] = None
         self.bus_release_time: Optional[float] = None
-        self.bus_timeout = 0.050   # response timeout after the request
-        self.bus_guard = 0.003     # silence required after the last packet
+        self.bus_timeout = bus_timeout  # response timeout after the request
+        self.bus_guard = bus_guard      # silence required after the last packet
         self.bus_pending_queue = collections.deque()
 
         # Local transceiver echo of our own transmitted frame.
@@ -749,6 +753,10 @@ def main():
     parser.add_argument("--bed-path", default="/tmp/klipper_mcu_bed")
     parser.add_argument("--tap-log", default=None,
                         help="Write a bus protocol/error tap log to this file")
+    parser.add_argument("--bus-guard", type=float, default=0.003,
+                        help="Silence (s) required before releasing the bus")
+    parser.add_argument("--bus-timeout", type=float, default=0.050,
+                        help="Response timeout (s) after a request")
     parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
@@ -772,7 +780,9 @@ def main():
     mux = MaestroMultiplexer(channel_configs=channel_configs,
                              main_port=args.main_port,
                              periph_port=args.periph_port,
-                             baud_rate=args.baud, tap=tap)
+                             baud_rate=args.baud, tap=tap,
+                             bus_guard=args.bus_guard,
+                             bus_timeout=args.bus_timeout)
 
     def sig_handler(signum, frame):
         logging.info("Caught signal %d, shutting down...", signum)
