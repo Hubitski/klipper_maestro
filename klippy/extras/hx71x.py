@@ -9,7 +9,10 @@ from . import bulk_sensor
 #
 # Constants
 #
-UPDATE_INTERVAL = 0.10
+# Batch reports every 50ms instead of 100ms.  At 80Hz this halves the
+# sensor_bulk_data payload (~30 bytes instead of ~58), leaving room for the
+# ACK and other responses in the 64-byte polled-slave TX buffer.
+UPDATE_INTERVAL = 0.05
 SAMPLE_ERROR_DESYNC = -0x80000000
 SAMPLE_ERROR_LONG_READ = 0x40000000
 
