@@ -558,7 +558,7 @@ class MaestroMultiplexer:
                 poll.register(chan.master_fd, events)
 
             try:
-                events = poll.poll(5)  # 5ms for responsive half-duplex handling
+                events = poll.poll(1)  # 1ms keeps polled-slave latency low
             except OSError as e:
                 if e.args[0] == errno.EINTR:
                     continue

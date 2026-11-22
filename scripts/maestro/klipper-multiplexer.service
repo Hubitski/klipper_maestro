@@ -24,8 +24,8 @@ Environment=SERIAL_BAUD=250000
 # Silence required after the last packet before the bus is released.
 # 12ms was tested and broke bed clocksync (Timer too close); keep the
 # original 3ms until the head0 bus lock-up is understood.
-Environment=BUS_GUARD=0.003
-Environment=BUS_TIMEOUT=0.012
+Environment=BUS_GUARD=0.001
+Environment=BUS_TIMEOUT=0.020
 Environment=TAP_LOG=/home/klipper/printer_data/logs/maestro_bus.log
 # Use Klipper's virtualenv: it provides pyserial (the system python3 does not).
 ExecStart=/home/klipper/klippy-env/bin/python /home/klipper/klipper/scripts/maestro/host_multiplexer.py --periph-port ${PERIPH_PORT} --baud ${SERIAL_BAUD} --bus-guard ${BUS_GUARD} --bus-timeout ${BUS_TIMEOUT} --tap-log ${TAP_LOG}
