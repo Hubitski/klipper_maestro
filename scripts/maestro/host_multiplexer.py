@@ -26,6 +26,7 @@ import sys
 import time
 import errno
 import fcntl
+import struct
 import select
 import signal
 import logging
@@ -70,11 +71,17 @@ PERIPH_DESTS = {0x20, 0x30, 0x40}
 
 class KlipperPacketParser:
     """Stream parser for extracting framed Klipper messages using a resilient sliding window."""
-    def __init__(self, name: str = "", allowed_dests=None):
+    def __init__(self, name: str = "", allowed_dests=None, tap=None, label=None):
         self.name = name
         self.allowed_dests = allowed_dests or VALID_DESTS
         self.buf = bytearray()
         self.bad_sync_count = 0
+        self.tap = tap
+        self.label = label or name
+
+    def _report(self, reason):
+        if self.tap is not None:
+            self.tap.parse_error(self.label, reason, self.buf)
 
     def feed(self, data: bytes):
         self.buf.extend(data)
@@ -89,6 +96,7 @@ class KlipperPacketParser:
             # Check length byte
             msglen = self.buf[0]
             if msglen < MESSAGE_MIN or msglen > MESSAGE_MAX:
+                self._report("bad-len")
                 del self.buf[:1]
                 self.bad_sync_count += 1
                 continue
@@ -97,6 +105,7 @@ class KlipperPacketParser:
             msgseq = self.buf[1]
             dest = msgseq & ~MESSAGE_SEQ_MASK
             if dest not in self.allowed_dests:
+                self._report("bad-dest")
                 del self.buf[:1]
                 self.bad_sync_count += 1
                 continue
@@ -107,6 +116,7 @@ class KlipperPacketParser:
 
             # Verify sync trailer byte
             if self.buf[msglen - 1] != MESSAGE_SYNC:
+                self._report("bad-trailer")
                 del self.buf[:1]
                 self.bad_sync_count += 1
                 continue
@@ -115,6 +125,7 @@ class KlipperPacketParser:
             msgcrc = (self.buf[msglen - 3] << 8) | self.buf[msglen - 2]
             crc = crc16_ccitt(self.buf[:msglen - 3])
             if crc != msgcrc:
+                self._report("bad-crc")
                 del self.buf[:1]
                 self.bad_sync_count += 1
                 continue
@@ -129,14 +140,17 @@ class KlipperPacketParser:
 
 class VirtualChannel:
     """Manages one pseudo-terminal (PTY) pair connected to Klippy."""
-    def __init__(self, name: str, node_id: int, symlink_path: str):
+    def __init__(self, name: str, node_id: int, symlink_path: str,
+                 tap=None):
         self.name = name
         self.node_id = node_id
         self.symlink_path = symlink_path
         self.master_fd: Optional[int] = None
         self.slave_fd: Optional[int] = None
         self.slave_name: str = ""
-        self.parser = KlipperPacketParser(name=name)
+        self.tap = tap
+        self.parser = KlipperPacketParser(name=name, tap=tap,
+                                          label="PTY:" + name)
         self.rx_bytes = 0
         self.rx_packets = 0
 
@@ -195,7 +209,8 @@ class VirtualChannel:
             except Exception:
                 pass
         self.close()
-        self.parser = KlipperPacketParser(name=self.name)
+        self.parser = KlipperPacketParser(name=self.name, tap=self.tap,
+                                          label="PTY:" + self.name)
         self.open()
         if poll is not None and self.master_fd is not None:
             poll.register(self.master_fd, select.POLLIN | select.POLLERR | select.POLLHUP)
@@ -216,12 +231,146 @@ def rewrite_packet_dest(pkt: bytes, new_dest: int) -> bytes:
     return bytes(m)
 
 
+class BusTap:
+    """Optional protocol/physical-layer log for the peripheral bus.
+
+    The mux is the only process that owns ttyS0, so the tap lives here rather
+    than in a separate sniffer.  It logs valid requests/responses, dropped
+    local echoes, parser errors, incomplete frames and UART error counters.
+    """
+    ICOUNT_FIELDS = ("cts", "dsr", "rng", "dcd", "rx", "tx",
+                     "frame", "overrun", "parity", "brk", "buf_overrun")
+    TIOCGICOUNT = 0x545D
+
+    def __init__(self, path):
+        self.fh = None
+        self.last_error_time = 0.0
+        self.last_error_key = None
+        self.stall_len = 0
+        self.stall_time = 0.0
+        self.stall_logged = False
+        self.icount = None
+        self.icount_time = 0.0
+        if not path:
+            return
+        try:
+            self.fh = open(path, "a", buffering=1)
+            self._write("TAP started")
+        except OSError as e:
+            logging.warning("Tap log %s disabled: %s", path, e)
+
+    def close(self):
+        if self.fh is not None:
+            try:
+                self.fh.close()
+            except Exception:
+                pass
+            self.fh = None
+
+    def _write(self, msg):
+        if self.fh is None:
+            return
+        try:
+            self.fh.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _hex(buf, limit=24):
+        h = bytes(buf[:limit]).hex()
+        return h + ("..." if len(buf) > limit else "")
+
+    def packet(self, direction, pkt, note=""):
+        msglen = pkt[0]
+        dest = pkt[1] & 0xF0
+        seq = pkt[1] & MESSAGE_SEQ_MASK
+        payload = pkt[2:msglen - 3]
+        kind = "ACK" if msglen == MESSAGE_MIN else "DATA"
+        self._write("%s %s dest=0x%02X seq=%d len=%d payload=%s %s"
+                    % (direction, kind, dest, seq, msglen,
+                       self._hex(payload), note))
+
+    def echo(self, pkt):
+        self._write("ECHO  <- dest=0x%02X seq=%d len=%d (dropped)"
+                    % (pkt[1] & 0xF0, pkt[1] & MESSAGE_SEQ_MASK, pkt[0]))
+
+    def event(self, msg):
+        self._write("BUS   " + msg)
+
+    def parse_error(self, label, reason, buf):
+        now = time.monotonic()
+        key = (label, reason)
+        if key == self.last_error_key and now - self.last_error_time < 0.1:
+            return
+        self.last_error_key = key
+        self.last_error_time = now
+        self._write("PARSE %s %s have=%d hex=%s"
+                    % (label, reason, len(buf), self._hex(buf)))
+
+    def stall(self, label, parser):
+        """Detect a frame that started with a valid header but stopped."""
+        now = time.monotonic()
+        n = len(parser.buf)
+        if n == 0:
+            self.stall_len = 0
+            self.stall_logged = False
+            return
+        if n != self.stall_len:
+            self.stall_len = n
+            self.stall_time = now
+            self.stall_logged = False
+            return
+        if now - self.stall_time < 0.010:
+            return
+        buf = parser.buf
+        want = buf[0] if (len(buf) >= 1
+                          and MESSAGE_MIN <= buf[0] <= MESSAGE_MAX) else -1
+        if not self.stall_logged:
+            self.stall_logged = True
+            self._write("STALL %s want=%d have=%d hex=%s"
+                        % (label, want, n, self._hex(buf, 32)))
+        if now - self.stall_time > 0.050:
+            self._write("RESYNC %s dropped=%d hex=%s"
+                        % (label, n, self._hex(buf, 32)))
+            buf.clear()
+            self.stall_len = 0
+            self.stall_logged = False
+
+    def poll_icount(self, fd, label="BUS"):
+        """Log deltas of the kernel UART error counters (framing/overrun/...)."""
+        now = time.monotonic()
+        if now - self.icount_time < 1.0:
+            return
+        self.icount_time = now
+        fmt = "I" * len(self.ICOUNT_FIELDS)
+        try:
+            buf = bytearray(struct.pack(fmt,
+                             *([0] * len(self.ICOUNT_FIELDS))))
+            res = fcntl.ioctl(fd, self.TIOCGICOUNT, buf)
+            vals = struct.unpack(fmt, res)
+        except Exception:
+            self.icount = None
+            return
+        cur = dict(zip(self.ICOUNT_FIELDS, vals))
+        if self.icount is not None:
+            delta = {k: cur[k] - self.icount[k] for k in self.ICOUNT_FIELDS}
+            if any(delta[k] for k in ("frame", "overrun", "parity", "brk",
+                                      "buf_overrun")):
+                self._write("PHY   %s frame+%d overrun+%d parity+%d brk+%d "
+                            "buf_overrun+%d"
+                            % (label, delta["frame"], delta["overrun"],
+                               delta["parity"], delta["brk"],
+                               delta["buf_overrun"]))
+        self.icount = cur
+
+
 class MaestroMultiplexer:
     """Main multiplexer engine coordinating the two UARTs and the PTYs."""
     def __init__(self, serial_port=None, baud_rate=250000, channel_configs=None,
-                 main_port=None, periph_port=None):
+                 main_port=None, periph_port=None, tap=None):
         self.baud_rate = baud_rate
         self.channel_configs = channel_configs or {}
+        self.tap = tap
         self.main_port = main_port
         # serial_port is kept as an alias for periph_port for the unit tests.
         self.periph_port = periph_port if periph_port is not None else serial_port
@@ -241,7 +390,8 @@ class MaestroMultiplexer:
 
         # Peripheral link.
         self.uart_parser = KlipperPacketParser(name="periph",
-                                               allowed_dests=PERIPH_DESTS)
+                                               allowed_dests=PERIPH_DESTS,
+                                               tap=tap, label="BUS")
         self.uart_tx_queue = bytearray()
 
         # Half-Duplex Multi-Drop Bus Arbiter for the peripheral transceiver.
@@ -304,7 +454,7 @@ class MaestroMultiplexer:
                 logging.warning("Skipping channel %s: no --periph-port", name)
                 continue
             chan = VirtualChannel(name=name, node_id=node_id,
-                                  symlink_path=symlink_path)
+                                  symlink_path=symlink_path, tap=self.tap)
             chan.open()
             self.channels[name] = chan
             self.fd_to_channel[chan.master_fd] = chan
@@ -328,6 +478,8 @@ class MaestroMultiplexer:
         self.main_fd = None
         self.periph_fd = None
         self.fd_to_link.clear()
+        if self.tap is not None:
+            self.tap.close()
 
     # ------------------------------------------------------------- main loop
     def run(self):
@@ -353,12 +505,14 @@ class MaestroMultiplexer:
                     if now >= self.bus_release_time and not self.uart_tx_queue:
                         logging.debug("Bus idle after response from 0x%02X",
                                       self.bus_active_dest)
-                        self._release_bus()
+                        self._release_bus("idle after 0x%02X"
+                                          % (self.bus_active_dest,))
                 elif (self.bus_tx_time is not None
                       and now - self.bus_tx_time > self.bus_timeout):
                     logging.debug("Bus timeout from 0x%02X, releasing",
                                   self.bus_active_dest)
-                    self._release_bus()
+                    self._release_bus("timeout from 0x%02X"
+                                      % (self.bus_active_dest,))
 
             if self.main_fd is not None:
                 events = select.POLLIN | select.POLLERR | select.POLLHUP
@@ -397,12 +551,19 @@ class MaestroMultiplexer:
                     if event & select.POLLIN:
                         self.handle_channel_read(chan, poll)
 
+            if self.tap is not None:
+                self.tap.stall("BUS", self.uart_parser)
+                if self.periph_fd is not None:
+                    self.tap.poll_icount(self.periph_fd)
+
             now = time.time()
             if now - last_stat_time > 30.0:
                 last_stat_time = now
                 self.log_stats()
 
-    def _release_bus(self):
+    def _release_bus(self, reason="idle"):
+        if self.tap is not None:
+            self.tap.event("release: " + reason)
         self.bus_busy = False
         self.bus_active_dest = 0
         self.bus_release_time = None
@@ -419,6 +580,8 @@ class MaestroMultiplexer:
         # only arrive later and is a different frame.
         self.pending_echo = pkt
         self.pending_echo_time = time.monotonic()
+        if self.tap is not None:
+            self.tap.packet("REQ  ->", pkt)
         self.uart_tx_queue.extend(pkt)
         if self.periph_fd is not None:
             self.handle_serial_write('periph')
@@ -474,9 +637,13 @@ class MaestroMultiplexer:
             # response from a peripheral node.
             if self._is_echo(pkt):
                 logging.debug("Dropped local transceiver echo len=%d", len(pkt))
+                if self.tap is not None:
+                    self.tap.echo(pkt)
                 continue
 
             dest = pkt[1] & 0xF0
+            if self.tap is not None:
+                self.tap.packet("RESP <-", pkt)
             target_chan = self.dest_to_channel.get(dest)
             if target_chan is None:
                 logging.warning("Peripheral packet with unknown DEST=0x%02X",
@@ -580,6 +747,8 @@ def main():
     parser.add_argument("--head0-path", default="/tmp/klipper_mcu_head0")
     parser.add_argument("--head1-path", default="/tmp/klipper_mcu_head1")
     parser.add_argument("--bed-path", default="/tmp/klipper_mcu_bed")
+    parser.add_argument("--tap-log", default=None,
+                        help="Write a bus protocol/error tap log to this file")
     parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
@@ -599,10 +768,11 @@ def main():
         'bed': (NODE_DEST_MAP['bed'], args.bed_path),
     }
 
+    tap = BusTap(args.tap_log) if args.tap_log else None
     mux = MaestroMultiplexer(channel_configs=channel_configs,
                              main_port=args.main_port,
                              periph_port=args.periph_port,
-                             baud_rate=args.baud)
+                             baud_rate=args.baud, tap=tap)
 
     def sig_handler(signum, frame):
         logging.info("Caught signal %d, shutting down...", signum)
