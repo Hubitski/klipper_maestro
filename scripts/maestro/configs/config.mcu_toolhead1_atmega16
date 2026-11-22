@@ -21,7 +21,7 @@ CONFIG_HAVE_STRICT_TIMING=y
 CONFIG_WANT_ADC=y
 # Toolheads have a single ADC consumer; the ADC timer clamp is only
 # needed where several channels share the converter (saves flash).
-CONFIG_ADC_TIMER_CLAMP=n
+CONFIG_ADC_TIMER_CLAMP=y
 # Fan state before Klipper connects: hotend fan (PD4) on, part fan (PD5)
 # forced off, so the hotend is cooled from power-up instead of the part
 # cooling fan spinning on a floating pin.
@@ -49,8 +49,8 @@ CONFIG_WANT_BUTTONS=n
 CONFIG_WANT_NEOPIXEL=n
 CONFIG_WANT_ST7920=n
 CONFIG_WANT_HD44780=n
-CONFIG_WANT_HX71X=y
+CONFIG_WANT_HX71X=n
 CONFIG_WANT_CS1237=n
 CONFIG_WANT_TMCUART=n
 CONFIG_WANT_PULSE_COUNTER=n
-CONFIG_WANT_TRIGGER_ANALOG=y
+CONFIG_WANT_TRIGGER_ANALOG=n
