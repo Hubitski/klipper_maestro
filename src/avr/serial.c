@@ -121,7 +121,7 @@ DECL_INIT(serial_init);
 // host's level-shifted output.  Do not enable USART1 at all: leave both pins
 // as inputs and use only the weak internal pull-up on TXD1 to keep the
 // transceiver recessive.  The host's driver can override it easily.
-static void
+void
 serial1_idle_init(void)
 {
     DDRD &= ~((1 << PD2) | (1 << PD3));
