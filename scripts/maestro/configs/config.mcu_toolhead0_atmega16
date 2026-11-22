@@ -24,10 +24,9 @@ CONFIG_WANT_ADC=y
 # both the sample and report paths, not just the report slot.
 CONFIG_ADC_TIMER_CLAMP=y
 CONFIG_ADC_TIMER_CLAMP_REPORT_ONLY=n
-# INITIAL_PINS is intentionally not set: its table plus the setup loop is
-# the last 20 bytes that keep this toolhead image over the 16 KB flash
-# (the load-cell and ADC-clamp code are required).  Consequence: the fans
-# stay off until Klipper connects; the heater is off until then as well.
+# Hotend fan (PD4) runs from power-up until Klipper connects.  Only PD4
+# is listed to fit the 16KB flash; PD5 (part fan) is left floating.
+CONFIG_INITIAL_PINS="PD4"
 # Code size optimizations for ATmega16 (16KB Flash / 1KB RAM)
 CONFIG_WANT_DEBUGCMDS=n
 CONFIG_WANT_STATS=n
