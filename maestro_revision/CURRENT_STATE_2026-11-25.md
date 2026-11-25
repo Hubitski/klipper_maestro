@@ -12,11 +12,12 @@
 
 - Принтер в **shutdown**: `MCU 'bed' shutdown: Timer too close` **на конфиге**, даже с **одним** датчиком стола (PA4). Это подтверждает: причина — незакрытый `command_query_analog_in` (clock от хоста уже в прошлом), а не 4 канала ADC.
 - На платах: head0 **16368**, head1 **16366** (full ADC clamp, HX711 3-sample, serial 64/64, **без boot-вентиляторов**, **без query-clamp**); bed **8848** (128/128 serial, stack 192, full clamp, **без query-clamp**); main **44252** (direct, router off).
-- В репозитории: bed **8916** (query-clamp) **собирается**; head0/head1 **16416 — FAIL (32 Б over 16384)** (report-only clamp + `toolhead_fans_init` + query-clamp). Hex голов в `firmware/` — старые (16368/16366), успешной сборки новых не было.
+- В репозитории: bed **8932** (query-clamp) и head0/head1 **16358** (boot fans, query-clamp только bed) — **все 5 прошивок собираются** (`f19cb1f`). Прошлый FAIL голов был не из-за 32 Б, а из-за `static toolhead_fans_init` → undefined symbol при линковке; исправлено `f19cb1f`. Новые hex на Pi и в `maestro_firmware_2026-11-22/` (head0/head1 16358, bed 8932).
 - Mux (host-only) обновлён и протестирован: parser resync, ACK по seq, recovery guard, per-node quarantine, echo FIFO, session flush; **19 тестов OK**; затем `session_idle_time` 2→15 c и карантин «delay, not drop» (коммиты `8327cf7`, `2c73c2b`).
 - Host-фиксы в Pi: `heaters.py` клампит поздний software-PWM; `hx71x.py SAMPLES_PER_BLOCK=3`; `bulk_sensor.py` `samples_per_block` + re-raise при shutdown; `mcu.py` reset 250 ms / stale config; `trigger_analog.py` 8 ms poll.
 - `printer.cfg`: стол на **одном** `bed_ts1` (PA4, 10 кОм) через `temperature_combined`/`mean`; `bed_ts2/3/4` отключены; `[load_cell_probe]` **включён** (head0:PD3/PD6); `[stepper_z] endstop_pin: probe:z_virtual_endstop`, `position_endstop` закомментирован.
-- Следующее: закрыть query-clamp для bed (8916), починить сборку голов (query-clamp только bed / trims), прошить bed+головы, `FIRMWARE_RESTART`, проверить bed на 1 датчике, затем тензо.
+- Следующее: прошить bed 8932 + головы 16358, `FIRMWARE_RESTART`, проверить bed на 1 датчике, затем тензо.
+- **Симуляция работает** (WSL2: Klippy + `host_multiplexer.py` + 3×simavr): все три MCU грузятся; bed без `CONFIG_ADC_QUERY_CLAMP` + задержка 10 мс даёт `MCU 'bed' error during config: Timer too close`, с clamp — нет. Детали: `scripts/maestro/sim/README.md`, `SIMULATION_PLAN_2026-11-25.md` §8.
 
 ---
 
@@ -61,9 +62,9 @@
 | Плата | На плате (2026-11-25) | В репозитории |
 |---|---|---|
 | main 1284p | 44252, direct, router off | 44252 (собирается) |
-| head0 | **16368** (full clamp, HX711 3-sample, serial 64/64, **без boot-fans, без query-clamp**) | **16416 FAIL** (report-only + `toolhead_fans_init` + query-clamp; 32 Б over) |
-| head1 | **16366** (то же) | **16416 FAIL** |
-| bed | **8848** (128/128, stack 192, full clamp, **без query-clamp**) | **8916** (query-clamp; собирается) |
+| head0 | **16368** (full clamp, HX711 3-sample, serial 64/64, **без boot-fans, без query-clamp**) | **16358** (boot fans, report-only clamp, query-clamp только bed; собирается) |
+| head1 | **16366** (то же) | **16358** (то же) |
+| bed | **8848** (128/128, stack 192, full clamp, **без query-clamp**) | **8932** (query-clamp; собирается) |
 
 - `avr-size out/klipper_diag.elf` после последней неудачной сборки head1: `text 16374, data 42, bss 185` → flash **16416** (16384 + 32).
 - Hex голов в `~/klipper/firmware/` — от последней **успешной** сборки (16368/16366); текущая сборка голов падает, новые hex не создаются.
@@ -207,7 +208,7 @@
 ### 7.3. Bed `Timer too close` на конфиге (сейчас)
 - Даже с одним датчиком. `MCU 'bed' error during config: Timer too close`.
 - Причина: `command_query_analog_in` передавал host-clock в `sched_add_timer()` без clamp; при задержанной доставке конфига clock уже в прошлом. Full/report clamp покрывал только `analog_in_event`.
-- Фикс: `7d62451`, query-clamp под `CONFIG_ADC_TIMER_CLAMP`; bed 8916 собирается; **на плату ещё не залит**; головы с этим фиксом не влезают.
+- Фикс: `7d62451` + `e6f0908` — query-clamp вынесен в `CONFIG_ADC_QUERY_CLAMP` (bed=y, головы=n). Bed 8932, головы 16358. В симуляции bed без clamp + задержка доставки 10 мс воспроизводит этот же `Timer too close`; с clamp его нет (при искусственной задержке остаётся отдельный `timer.c:205`, см. §7.3 и SIMULATION_PLAN §8).
 - После прошивки bed 8916 ожидается прохождение конфига; если `Timer too close` останется — смотреть `analog_in_shutdown` re-arm и `timer.c:205`.
 
 ### 7.4. Bed 4 датчика → `Lost communication`
@@ -261,8 +262,8 @@
 
 ## 10. Ближайший план (по слоям)
 
-1. **Починить сборку голов**: query-clamp только bed (`CONFIG_ADC_QUERY_CLAMP`), головы ~16378 (fans + report-only); собрать, проверить размеры. Альтернатива — trims.
-2. **Прошить bed 8916** (query-clamp) и **головы** (boot fans + 3-sample; query-clamp только если влезет) — принтер выключен, COM6, `-p m16`.
+1. **Сборка голов** — сделано (`f19cb1f`): head0/head1 16358 с boot fans, query-clamp только bed; bed 8932.
+2. **Прошить bed 8932** (query-clamp) и **головы 16358** (boot fans + 3-sample) — принтер выключен, COM6, `-p m16`.
 3. **`FIRMWARE_RESTART`** (или stop klipper → restart klipper-mcu → start klipper); проверить `state ready` и что bed с одним датчиком проходит конфиг; `Timer too close` не повторяется.
 4. **PID extruder 200 °C**; затем **PID bed 80 °C**. Если `Timer too close` — смотреть `print_time`/clock/tap; PWM clamp уже в host.
 5. **Тензо**: `LOAD_CELL_CALIBRATE` → TARE → CALIBRATE GRAMS → ACCEPT → SAVE_CONFIG; `PROBE_CALIBRATE` → `Z_OFFSET_APPLY_PROBE`; `G28 Z`; soak.
