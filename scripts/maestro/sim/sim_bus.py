@@ -190,6 +190,10 @@ def main():
     ap.add_argument("--jitter", action="append", default=[], metavar="NAME=SEC")
     ap.add_argument("--drop", action="append", default=[], metavar="NAME=P")
     ap.add_argument("--stats-interval", type=float, default=10.0)
+    ap.add_argument("--rogue-interval", type=float, default=0.0,
+                    help="seconds between random stray bytes (0=off)")
+    ap.add_argument("--rogue-byte", type=int, default=-1,
+                    help="fixed stray byte value (default random)")
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -217,6 +221,9 @@ def main():
         by_name[name].drop = p
 
     wire = Wire(args.baud)
+    rogue_interval = max(0.0, args.rogue_interval)
+    next_rogue = time.monotonic() + rogue_interval if rogue_interval else 0.0
+    rogue_count = 0
 
     # Upstream side: the mux opens the slave path, we keep the master.
     master, slave = pty.openpty()
@@ -245,6 +252,14 @@ def main():
 
     while not stopping[0]:
         now = time.monotonic()
+        if rogue_interval and now >= next_rogue:
+            byte = (args.rogue_byte if 0 <= args.rogue_byte <= 255
+                    else random.randrange(256))
+            wire.submit("rogue", bytes((byte,)), now)
+            rogue_count += 1
+            next_rogue += rogue_interval
+            if next_rogue < now:
+                next_rogue = now + rogue_interval
         for node in nodes:
             if node.fd < 0 and now - node.last_open > 1.0:
                 node.open(now)
@@ -311,8 +326,8 @@ def main():
         if not args.quiet and args.stats_interval > 0:
             if now - stats_last >= args.stats_interval:
                 stats_last = now
-                log("echo=%d up=%d collisions=%d "
-                    % (echo_bytes, up_bytes, wire.collisions)
+                log("echo=%d up=%d collisions=%d rogue=%d "
+                    % (echo_bytes, up_bytes, wire.collisions, rogue_count)
                     + " ".join("%s rx=%d tx=%d q=%d"
                                % (n.name, n.rx, n.tx, len(n.pending))
                                for n in nodes))

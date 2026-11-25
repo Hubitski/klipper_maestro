@@ -187,12 +187,13 @@ main(int argc, char **argv)
     uint32_t freq = 16000000;
     uint32_t chunk_us = 250;
     int gdb = 0, quiet = 0, trace_uart = 0, log_level = 0;
+    double speed = 1.0;
     struct adc_state adc = {0};
     struct hx711_state hx = {0};
     int have_hx = 0;
 
     enum { OPT_ADC = 1000, OPT_HX711, OPT_CHUNK, OPT_GDB, OPT_QUIET,
-           OPT_TRACE_UART, OPT_LOG };
+           OPT_TRACE_UART, OPT_LOG, OPT_SPEED };
     static struct option longopts[] = {
         { "adc",     required_argument, NULL, OPT_ADC },
         { "hx711",   required_argument, NULL, OPT_HX711 },
@@ -201,6 +202,7 @@ main(int argc, char **argv)
         { "quiet",   no_argument,       NULL, OPT_QUIET },
         { "trace-uart", no_argument,    NULL, OPT_TRACE_UART },
         { "log",     required_argument, NULL, OPT_LOG },
+        { "speed",   required_argument, NULL, OPT_SPEED },
         { NULL, 0, NULL, 0 }
     };
     int c;
@@ -254,6 +256,7 @@ main(int argc, char **argv)
         case OPT_QUIET: quiet = 1; break;
         case OPT_TRACE_UART: trace_uart = 1; break;
         case OPT_LOG: log_level = atoi(optarg); break;
+        case OPT_SPEED: speed = atof(optarg); break;
         default: usage(argv[0]); return 2;
         }
     }
@@ -262,6 +265,8 @@ main(int argc, char **argv)
         return 2;
     }
     if (chunk_us < 20) chunk_us = 20;
+    if (speed < 0.1) speed = 0.1;
+    if (speed > 100.0) speed = 100.0;
 
     elf_firmware_t f;
     memset(&f, 0, sizeof(f));
@@ -359,7 +364,8 @@ main(int argc, char **argv)
             continue;
         next_check = avr->cycle + (freq / 1000000ull) * chunk_us;
         uint64_t done = avr->cycle - t0_cycles;
-        uint64_t deadline = start_ns + cycles_to_ns(done, freq);
+        uint64_t deadline = start_ns
+            + (uint64_t)((double)cycles_to_ns(done, freq) / speed);
         uint64_t now = now_ns();
         if (now < deadline) {
             uint64_t remain = deadline - now;

@@ -28,7 +28,19 @@ KLIPPY_PY=${KLIPPY_PY:-$HOME/klippy-sim-env/bin/python}
 LOG_DIR=${LOG_DIR:-/tmp/maestro_sim}
 BED_DELAY=${BED_DELAY:-0}
 BED_JITTER=${BED_JITTER:-0}
+BED_DROP=${BED_DROP:-0}
+HEAD0_DELAY=${HEAD0_DELAY:-0}
+HEAD0_JITTER=${HEAD0_JITTER:-0}
+HEAD0_DROP=${HEAD0_DROP:-0}
+HEAD1_DELAY=${HEAD1_DELAY:-0}
+HEAD1_JITTER=${HEAD1_JITTER:-0}
+HEAD1_DROP=${HEAD1_DROP:-0}
+ROGUE_INTERVAL=${ROGUE_INTERVAL:-0}
 BED_ELF=${BED_ELF:-bed.elf}
+SIM_SPEED=${SIM_SPEED:-1}
+HUB_BAUD=$(python3 -c "print(int(250000*$SIM_SPEED))")
+BUS_GUARD=$(python3 -c "print(0.001/$SIM_SPEED)")
+BUS_TIMEOUT=$(python3 -c "print(0.020/$SIM_SPEED)")
 
 CFG=${CFG:-"$SIM_DIR/printer-sim.cfg"}
 SIM="$SIM_BUILD/maestro_sim"
@@ -65,16 +77,18 @@ trap cleanup INT TERM EXIT
 # ADC values at 25 C: head EPCOS 100K / 4.7k pull-up = 224 mV,
 # bed NTC 40k / 10k pull-up = 1000 mV.
 "$SIM" -m atmega16 -f 16000000 -e "$ELF_DIR/head0.elf" \
-    -u /tmp/sim_node_head0 --adc 4=224 \
+    -u /tmp/sim_node_head0 --adc 4=224 --speed "$SIM_SPEED" \
     --hx711 counts=1000,rate=80 >"$LOG_DIR/head0.out" 2>&1 &
 PIDS="$PIDS $!"
 
 "$SIM" -m atmega16 -f 16000000 -e "$ELF_DIR/head1.elf" \
-    -u /tmp/sim_node_head1 --adc 4=224 >"$LOG_DIR/head1.out" 2>&1 &
+    -u /tmp/sim_node_head1 --adc 4=224 --speed "$SIM_SPEED" \
+    >"$LOG_DIR/head1.out" 2>&1 &
 PIDS="$PIDS $!"
 
 "$SIM" -m atmega16 -f 16000000 -e "$ELF_DIR/$BED_ELF" \
-    -u /tmp/sim_node_bed --adc 4=1000 >"$LOG_DIR/bed.out" 2>&1 &
+    -u /tmp/sim_node_bed --adc 4=1000 --speed "$SIM_SPEED" \
+    >"$LOG_DIR/bed.out" 2>&1 &
 PIDS="$PIDS $!"
 
 # Wait for the three PTYs to be published.
@@ -100,7 +114,14 @@ python3 "$SIM_DIR/prime_node.py" head0=/tmp/sim_node_head0 \
 
 # --- bus hub ---------------------------------------------------------------
 python3 "$SIM_DIR/sim_bus.py" --upstream /tmp/sim_bus_upstream \
-    --delay "bed=$BED_DELAY" --jitter "bed=$BED_JITTER" \
+    --baud "$HUB_BAUD" \
+    --delay "head0=$HEAD0_DELAY" --delay "head1=$HEAD1_DELAY" \
+    --delay "bed=$BED_DELAY" \
+    --jitter "head0=$HEAD0_JITTER" --jitter "head1=$HEAD1_JITTER" \
+    --jitter "bed=$BED_JITTER" \
+    --drop "head0=$HEAD0_DROP" --drop "head1=$HEAD1_DROP" \
+    --drop "bed=$BED_DROP" \
+    --rogue-interval "$ROGUE_INTERVAL" \
     >"$LOG_DIR/sim_bus.log" 2>&1 &
 PIDS="$PIDS $!"
 
@@ -111,8 +132,8 @@ done
 
 # --- multiplexer (the same code that runs on the Pi) -----------------------
 (cd "$KLIPPER_DIR" && python3 scripts/maestro/host_multiplexer.py \
-    --periph-port /tmp/sim_bus_upstream --baud 250000 \
-    --bus-guard 0.001 --bus-timeout 0.020 \
+    --periph-port /tmp/sim_bus_upstream --baud "$HUB_BAUD" \
+    --bus-guard "$BUS_GUARD" --bus-timeout "$BUS_TIMEOUT" \
     --tap-log "$LOG_DIR/maestro_bus.log") >"$LOG_DIR/mux.log" 2>&1 &
 PIDS="$PIDS $!"
 

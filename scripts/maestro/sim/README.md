@@ -64,6 +64,29 @@ CFG=$PWD/scripts/maestro/sim/bed-only.cfg BED_ELF=bed.elf BED_DELAY=0.01 \
 # -> no Timer too close at config (clamped query clock)
 ```
 
+## Stress and speed
+
+```
+# clean baseline: no MCU shutdowns, no mux timeouts expected
+DURATION=300 sh scripts/maestro/sim/run_stress.sh
+
+# fault injection: delays/jitter/drop and random stray bytes on the wire
+DURATION=300 ROGUE_INTERVAL=0.02 HEAD0_JITTER=0.0002 BED_DELAY=0.001 \
+    sh scripts/maestro/sim/run_stress.sh
+
+# speed-up (experimental; the host's wall-clock timers are not scaled)
+SIM_SPEED=10 DURATION=60 sh scripts/maestro/sim/run_stress.sh
+```
+
+`run_stress.sh` prints counts of MCU shutdowns, mux timeouts, tap parse
+errors, quarantines, queue-full events, collisions and rogue bytes, and
+exits non-zero on an MCU shutdown or if fewer than three MCUs loaded.
+
+Note: at the time of writing the clean stress baseline is red - head0's
+identify_response reaches the mux with a bad trailer.  This is under
+investigation; do not treat a red baseline as a firmware bug until the
+simulator's byte-slot delivery is ruled out.
+
 ## simavr quirks worked around
 
 1. **Real-time pacing.** simavr's raw run is as-fast-as-possible; Klipper
