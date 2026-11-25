@@ -6,6 +6,11 @@ if MACH_LINUX
 config LINUX_SELECT
     bool
     default y
+    # command.h needs a concrete MESSAGE_DEST; without SERIAL the Kconfig
+    # emits an empty CONFIG_SERIAL_NODE_ID (literally "0x") and the build
+    # fails.  The Linux MCU talks over a unix socket, but it still uses the
+    # same framing and the default node id 0x10 is the correct one.
+    select SERIAL
     select HAVE_GPIO
     select HAVE_GPIO_ADC
     select HAVE_GPIO_SPI
