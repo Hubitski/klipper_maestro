@@ -517,7 +517,10 @@ class MaestroMultiplexer:
         # New-Klippy-session heuristic: a request arriving after the bus has
         # been idle for this long is treated as the start of a fresh session,
         # so stale queued/PTY data from the previous client is discarded.
-        self.session_idle_time = 2.0
+        # Must be longer than Klippy's idle poll interval (~5s in shutdown),
+        # otherwise every poll is mistaken for a new session and the queues
+        # (including Klippy's reset) are cleared on every cycle.
+        self.session_idle_time = 15.0
 
         self.running = False
 
@@ -737,7 +740,8 @@ class MaestroMultiplexer:
             return
         self.consecutive_timeouts[dest] = 0
         self.quarantine_until[dest] = now + self.quarantine_time
-        self._drop_queued_for(dest)
+        # Do not drop the node's queue: the quarantine delays dispatch, so
+        # Klippy's reset/identify packets still reach the MCU after 1s.
         logging.warning("Quarantining 0x%02X for %.1fs after %d timeouts",
                         dest, self.quarantine_time, count)
         if self.tap is not None:
@@ -754,10 +758,10 @@ class MaestroMultiplexer:
         """All downstream traffic goes through here (no direct-start bypass)."""
         now = time.monotonic()
         if now < self.quarantine_until.get(dest, 0.0):
-            logging.warning("Dropping packet for quarantined 0x%02X", dest)
+            # Delay, do not drop: the node may be recovering and Klippy's
+            # reset/identify must still get through once the quarantine ends.
             if self.tap is not None:
-                self.tap.event("quarantine drop 0x%02X" % dest)
-            return
+                self.tap.event("quarantine delay 0x%02X" % dest)
         # Bound the per-node backlog so a retransmitting dead node cannot make
         # the queue grow without limit.  Drop its oldest queued packet.
         queued = [i for i, (d, _) in enumerate(self.bus_pending_queue)
@@ -779,13 +783,13 @@ class MaestroMultiplexer:
         now = time.monotonic()
         if now < self.bus_recovery_until:
             return
-        while self.bus_pending_queue:
+        # Rotate quarantined nodes to the back instead of dropping them, so a
+        # healthy node proceeds immediately and the quarantined node's queue
+        # (including Klippy's reset) is dispatched after the quarantine ends.
+        for _ in range(len(self.bus_pending_queue)):
             dest, pkt = self.bus_pending_queue.popleft()
             if now < self.quarantine_until.get(dest, 0.0):
-                logging.warning("Skipping packet for quarantined 0x%02X",
-                                dest)
-                if self.tap is not None:
-                    self.tap.event("quarantine skip 0x%02X" % dest)
+                self.bus_pending_queue.append((dest, pkt))
                 continue
             self._start_bus_packet(dest, pkt)
             return

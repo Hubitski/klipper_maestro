@@ -296,7 +296,15 @@ class TestMaestroMultiplexer(unittest.TestCase):
 
         self.assertTrue(mux.bus_busy, "healthy node must proceed immediately")
         self.assertEqual(mux.bus_active_dest, 0x30)
-        self.assertFalse(any(d == 0x20 for d, _ in mux.bus_pending_queue))
+        # Quarantine delays, it does not drop: the 0x20 packet stays queued
+        # so Klippy's reset can still reach the MCU after the quarantine.
+        self.assertTrue(any(d == 0x20 for d, _ in mux.bus_pending_queue))
+        mux.quarantine_until[0x20] = 0.0
+        mux.bus_busy = False
+        mux.uart_tx_queue.clear()
+        mux._dispatch_next_bus_packet()
+        self.assertTrue(mux.bus_busy)
+        self.assertEqual(mux.bus_active_dest, 0x20)
 
     def test_ack_resets_timeout_counter(self):
         mux = self.make_mux()
