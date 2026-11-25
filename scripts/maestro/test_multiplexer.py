@@ -291,20 +291,60 @@ class TestMaestroMultiplexer(unittest.TestCase):
 
         mux.bus_recovery_until = 0.0
         # Leave a bed packet in the queue, then a head1 packet behind it.
-        mux.bus_pending_queue.append((0x20, self.make_request(0x20, seq=1)))
+        mux.bus_pending_queue.append(
+            (0x20, self.make_request(0x20, seq=1), False))
         mux._enqueue_bus_packet(0x30, self.make_request(0x30, seq=2))
 
         self.assertTrue(mux.bus_busy, "healthy node must proceed immediately")
         self.assertEqual(mux.bus_active_dest, 0x30)
         # Quarantine delays, it does not drop: the 0x20 packet stays queued
         # so Klippy's reset can still reach the MCU after the quarantine.
-        self.assertTrue(any(d == 0x20 for d, _ in mux.bus_pending_queue))
+        self.assertTrue(any(d == 0x20 for d, _, _ in mux.bus_pending_queue))
         mux.quarantine_until[0x20] = 0.0
         mux.bus_busy = False
         mux.uart_tx_queue.clear()
         mux._dispatch_next_bus_packet()
         self.assertTrue(mux.bus_busy)
         self.assertEqual(mux.bus_active_dest, 0x20)
+
+    def test_urgent_cross_node_priority(self):
+        mux = self.make_mux()
+        mux.node_urgent_ids[0x20] = {0x11}  # queue_step
+        # Keep the bus busy so both requests queue up without dispatching.
+        mux.bus_busy = True
+        mux.bus_active_dest = 0x30
+        mux.uart_tx_queue.clear()
+        mux._enqueue_bus_packet(0x40, self.make_request(0x40, seq=1,
+                                                        payload=b"\x20"))
+        mux._enqueue_bus_packet(0x20, self.make_request(0x20, seq=2,
+                                                        payload=b"\x11"))
+        # Free the bus: the urgent head must jump ahead of the earlier bed
+        # frame even though it arrived second.
+        mux.bus_busy = False
+        mux._dispatch_next_bus_packet()
+        self.assertEqual(mux.bus_active_dest, 0x20)
+
+    def test_priority_keeps_per_node_order(self):
+        mux = self.make_mux()
+        mux.node_urgent_ids[0x20] = {0x11}
+        mux.bus_busy = True
+        mux.bus_active_dest = 0x30
+        mux.uart_tx_queue.clear()
+        # Same node: a normal frame queued before an urgent one must still be
+        # served first, because the firmware NAKs out-of-order packets.
+        mux._enqueue_bus_packet(0x20, self.make_request(0x20, seq=1,
+                                                        payload=b"\x20"))
+        mux._enqueue_bus_packet(0x20, self.make_request(0x20, seq=2,
+                                                        payload=b"\x11"))
+        mux.bus_busy = False
+        mux._dispatch_next_bus_packet()
+        self.assertEqual(mux.bus_active_dest, 0x20)
+        self.assertEqual(mux.bus_request_seq, 1)
+        # The urgent frame is now the head and goes next.
+        mux.bus_busy = False
+        mux.uart_tx_queue.clear()
+        mux._dispatch_next_bus_packet()
+        self.assertEqual(mux.bus_request_seq, 2)
 
     def test_ack_resets_timeout_counter(self):
         mux = self.make_mux()

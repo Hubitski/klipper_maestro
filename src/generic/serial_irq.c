@@ -21,11 +21,15 @@
 #define RX_BUFFER_SIZE 64
 #define TX_BUFFER_SIZE 64
 #else
-// Bed (no steppers): four ~15-byte analog_in_state reports are queued
-// between host polls, and 64 bytes could not hold them plus the 5-byte
-// ACK.  The move queue is unused here, so the RAM is free.
+// Bed (no steppers): four analog_in channels at report_time 0.5 emit up
+// to 8 x 15-byte analog_in_state reports between the ~1 Hz get_clock
+// polls, plus the 11-byte clock response and the 5-byte ACK (136
+// bytes).  128 bytes dropped the clock response every second.  192 holds
+// that burst plus ~3 more reports if a poll is late; 256 does not leave
+// enough heap for the four analog_in (43 B) and four digital_out (36 B)
+// objects after the 192-byte stack.  The move queue is unused here.
 #define RX_BUFFER_SIZE 128
-#define TX_BUFFER_SIZE 128
+#define TX_BUFFER_SIZE 192
 #endif
 #elif CONFIG_HAVE_LIMITED_CODE_SIZE
 #define RX_BUFFER_SIZE 96

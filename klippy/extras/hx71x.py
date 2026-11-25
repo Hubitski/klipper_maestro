@@ -12,9 +12,19 @@ from . import bulk_sensor
 # Host batch/status cadence (also the clock-smoothing horizon).  This does
 # not set the MCU report size: the MCU sends sensor_bulk_data when its
 # CONFIG_SENSOR_BULK_DATA_SIZE buffer fills.  The 16KB toolheads set that to
-# 12 bytes (3 samples), and SAMPLES_PER_BLOCK below must match.  Keeping the
-# status query at 50ms drains the 3-sample reports before three of them can
-# pile up in the 64-byte polled-slave TX buffer.
+# 12 bytes (3 samples), and SAMPLES_PER_BLOCK below must match.
+#
+# The status query is also the poll that drains the polled-slave TX buffer,
+# so this interval is *not* free to raise.  Measured in the simulator on the
+# 64-byte toolhead buffer (one 3-sample report ~20B + status reply ~16B +
+# ACK 5B):
+#   0.050s -> 10.8% request retransmits, 1355 bulk reports delivered
+#   0.075s -> 18.5% request retransmits, 1043 bulk reports delivered
+#   0.100s -> peripheral MCUs fail to configure ("Invalid oid type")
+# A longer interval leaves two or three 3-sample reports queued when the
+# query response must be appended, so the firmware drops the status/ACK and
+# the poll (which is what drains the buffer) is lost.  Keep 50ms unless the
+# firmware TX buffer or the sample block size changes.
 UPDATE_INTERVAL = 0.05
 SAMPLES_PER_BLOCK = 3
 SAMPLE_ERROR_DESYNC = -0x80000000

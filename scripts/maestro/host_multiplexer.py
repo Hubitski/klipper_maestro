@@ -30,10 +30,29 @@ import termios
 import struct
 import select
 import signal
+import zlib
+import json
 import logging
 import argparse
 import collections
 from typing import Dict, Optional, Tuple
+
+# Command names that must not wait behind bulk sensor polling.  The set is
+# matched against the data dictionary each MCU sends during identify, so the
+# numeric message ids never have to be hard-coded (they differ per firmware
+# build).  Everything not listed keeps strict arrival order within its node;
+# only the choice of *which node* to serve next is affected.
+URGENT_COMMAND_NAMES = frozenset((
+    # stepper motion
+    "queue_step", "reset_step_clock", "set_next_step_dir",
+    # scheduled outputs / heaters
+    "queue_digital_out", "set_digital_out", "queue_pwm_out", "set_pwm_out",
+    "set_digital_out_pwm_cycle",
+    # analog sampling (thermistors, ADC endstops)
+    "query_analog_in",
+    # safety
+    "emergency_stop", "clear_shutdown",
+))
 
 # Precompute CCITT CRC-16 table (poly 0x1021)
 def _build_crc16_table():
@@ -512,6 +531,14 @@ class MaestroMultiplexer:
         self.quarantine_threshold = 3
         self.quarantine_time = 1.0
 
+        # Cross-node priority.  Requests are always dequeued in arrival order
+        # within a node (the firmware NAKs out-of-sequence packets); only the
+        # next node to serve is chosen by priority.  Message ids are learned
+        # from each node's identify_response dictionary, keyed by DEST.
+        # bus_pending_queue entries are (dest, packet, urgent).
+        self.node_urgent_ids: Dict[int, set] = {}
+        self.identify_buffers: Dict[int, dict] = {}
+
         # Local transceiver echo of our own transmitted frames.  A FIFO (not a
         # single slot) so an echo delayed past a transaction boundary is still
         # recognised and dropped instead of reaching Klippy as a fake response.
@@ -769,14 +796,87 @@ class MaestroMultiplexer:
                 self.tap.event("quarantine delay 0x%02X" % dest)
         # Bound the per-node backlog so a retransmitting dead node cannot make
         # the queue grow without limit.  Drop its oldest queued packet.
-        queued = [i for i, (d, _) in enumerate(self.bus_pending_queue)
+        queued = [i for i, (d, _, _) in enumerate(self.bus_pending_queue)
                   if d == dest]
         if len(queued) >= self.bus_queue_per_node_max:
             del self.bus_pending_queue[queued[0]]
             logging.warning("Node 0x%02X queue full; dropped oldest packet",
                             dest)
-        self.bus_pending_queue.append((dest, pkt))
+        self.bus_pending_queue.append(
+            (dest, pkt, self._is_urgent_request(dest, pkt)))
         self._dispatch_next_bus_packet()
+
+    @staticmethod
+    def _decode_vlq(buf: bytes, pos: int = 0):
+        """Klipper's big-endian 7-bit VLQ (matches src/command.c)."""
+        value = 0
+        while pos < len(buf):
+            c = buf[pos]
+            pos += 1
+            value = (value << 7) | (c & 0x7F)
+            if not (c & 0x80):
+                break
+        return value, pos
+
+    def _is_urgent_request(self, dest: int, pkt: bytes) -> bool:
+        ids = self.node_urgent_ids.get(dest)
+        if not ids:
+            return False
+        payload = pkt[2:-3]
+        if not payload:
+            return False
+        msgid, _ = self._decode_vlq(payload)
+        return msgid in ids
+
+    def _note_identify_chunk(self, dest: int, pkt: bytes):
+        """Reassemble a node's identify_response stream and learn its command
+        ids.  identify_response is msgid 0: [msgid][offset vlq][data]."""
+        payload = pkt[2:-3]
+        if len(payload) < 2 or payload[0] != 0:
+            return
+        state = self.identify_buffers.get(dest)
+        if state is not None and state.get("done"):
+            return
+        offset, pos = self._decode_vlq(payload, 1)
+        if pos >= len(payload):
+            return
+        # data=%.*s is a one-byte length followed by that many bytes.
+        length = payload[pos]
+        pos += 1
+        data = payload[pos:pos + length]
+        if state is None:
+            state = self.identify_buffers[dest] = {"buf": bytearray(),
+                                                   "done": False}
+        buf = state["buf"]
+        if offset == len(buf):
+            buf.extend(data)
+        elif offset < len(buf):
+            # Duplicate chunk (the identify exchange is retried on timeout).
+            if data and bytes(buf[offset:offset + len(data)]) != data:
+                return
+        else:
+            return
+        if not data:
+            self._finish_identify(dest, state)
+
+    def _finish_identify(self, dest: int, state: dict):
+        state["done"] = True
+        try:
+            raw = zlib.decompress(bytes(state["buf"]))
+            dictionary = json.loads(raw)
+            urgent = {msgid for name, msgid
+                      in dictionary.get("commands", {}).items()
+                      if name.split()[0] in URGENT_COMMAND_NAMES}
+        except Exception as e:
+            logging.warning("Node 0x%02X: could not parse data dictionary: %s",
+                            dest, e)
+            return
+        self.node_urgent_ids[dest] = urgent
+        logging.info("Node 0x%02X: prioritising %d urgent command ids "
+                     "(motion/heaters/adc)", dest, len(urgent))
+        if self.tap is not None:
+            self.tap.event("priority 0x%02X: %d urgent ids"
+                           % (dest, len(urgent)))
 
     def _dispatch_next_bus_packet(self):
         if self.bus_busy:
@@ -788,16 +888,26 @@ class MaestroMultiplexer:
         now = time.monotonic()
         if now < self.bus_recovery_until:
             return
-        # Rotate quarantined nodes to the back instead of dropping them, so a
-        # healthy node proceeds immediately and the quarantined node's queue
-        # (including Klippy's reset) is dispatched after the quarantine ends.
-        for _ in range(len(self.bus_pending_queue)):
-            dest, pkt = self.bus_pending_queue.popleft()
-            if now < self.quarantine_until.get(dest, 0.0):
-                self.bus_pending_queue.append((dest, pkt))
-                continue
-            self._start_bus_packet(dest, pkt)
+        queue = self.bus_pending_queue
+        if not queue:
             return
+        # Only the first queued packet for each node is eligible: the
+        # firmware NAKs packets that arrive out of sequence, so per-node
+        # order is inviolable.  Among those heads, serve an urgent frame
+        # first; otherwise keep the existing cross-node arrival order.
+        heads = {}
+        for i, (dest, _pkt, _urgent) in enumerate(queue):
+            if dest not in heads:
+                heads[dest] = i
+        eligible = [i for dest, i in heads.items()
+                    if now >= self.quarantine_until.get(dest, 0.0)]
+        if not eligible:
+            return
+        urgent = [i for i in eligible if queue[i][2]]
+        pick = min(urgent) if urgent else min(eligible)
+        dest, pkt, _urgent = queue[pick]
+        del queue[pick]
+        self._start_bus_packet(dest, pkt)
 
     def _start_bus_packet(self, dest: int, pkt: bytes):
         self.bus_busy = True
@@ -902,6 +1012,12 @@ class MaestroMultiplexer:
             now = time.monotonic()
             self.bus_last_byte_time = now
             self.bus_last_activity = now
+            # A node can append another queued report *after* the terminating
+            # ACK.  Keep the transaction open until the line is genuinely
+            # quiet, otherwise the next request is driven into the tail of
+            # that burst and is silently lost (the slave sees a bad frame).
+            if self.bus_busy and self.bus_release_time is not None:
+                self.bus_release_time = now + self.bus_guard
 
         if link == 'main':
             # Direct motherboard link: pass bytes through untouched.
@@ -933,6 +1049,10 @@ class MaestroMultiplexer:
                 logging.warning("Peripheral packet with unknown DEST=0x%02X",
                                 dest)
                 continue
+
+            # Learn the node's command ids from its identify exchange so
+            # motion/heater frames can jump the cross-node queue.
+            self._note_identify_chunk(dest, pkt)
 
             # Only the terminating ACK may end a polled transaction.
             self._note_bus_packet(dest, pkt)
