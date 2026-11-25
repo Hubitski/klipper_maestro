@@ -21,6 +21,8 @@ class PrinterSensorCombined:
         self.sensor = self
         # get empty list for sensors, could be any sensor class or a heater
         self.sensors = []
+        # per-sensor flag: has it produced at least one real report?
+        self.sensor_valid = []
         # get combination method to handle the different sensor values with
         algos = {'min': min, 'max': max, 'mean': mean}
         self.apply_mode = config.getchoice('combination_method', algos)
@@ -58,6 +60,7 @@ class PrinterSensorCombined:
                         % (sensor_name,))
 
             self.sensors.append(sensor)
+        self.sensor_valid = [False] * len(self.sensors)
 
     def _handle_ready(self):
         # Start temperature update timer
@@ -78,10 +81,25 @@ class PrinterSensorCombined:
 
     def update_temp(self, eventtime):
         values = []
-        for sensor in self.sensors:
+        for i, sensor in enumerate(self.sensors):
             sensor_status = sensor.get_status(eventtime)
             sensor_temperature = sensor_status['temperature']
+            if sensor_temperature is None:
+                continue
+            # Generic temperature sensors report 0.0 until their first
+            # measurement arrives.  Do not include such a placeholder in
+            # the combination (nor in the deviation check) - otherwise a
+            # sensor that is merely slow to start looks like a real 0 C
+            # reading and shuts the printer down at boot.
+            if not self.sensor_valid[i]:
+                if not sensor_temperature:
+                    continue
+                self.sensor_valid[i] = True
             values.append(sensor_temperature)
+
+        if not values:
+            # No sensor has reported yet - keep the previous value.
+            return
 
         # check if values are out of max_deviation range
         if (max(values) - min(values)) > self.max_deviation:

@@ -500,8 +500,13 @@ class MaestroMultiplexer:
         self.bus_recovery_guard = 0.003
         self.bus_recovery_until = 0.0
 
-        # Per-node fairness / isolation.
-        self.bus_queue_per_node_max = 2
+        # Per-node fairness / isolation.  This must exceed the largest burst
+        # Klippy enqueues in one go (a full config block is ~100 short
+        # commands).  Ordering matters: the firmware NAKs every packet that
+        # arrives out of sequence, so dropping from the middle of the queue
+        # turns a config burst into a retransmit storm.  The cap only exists
+        # to bound a truly dead node's backlog.
+        self.bus_queue_per_node_max = 256
         self.consecutive_timeouts: Dict[int, int] = {}
         self.quarantine_until: Dict[int, float] = {}
         self.quarantine_threshold = 3

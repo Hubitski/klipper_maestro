@@ -217,7 +217,15 @@ analog_in_shutdown(void)
         a->ta = NULL;
         if (a->sample_count) {
             a->state = a->sample_count + 1;
+#if CONFIG_ADC_TIMER_CLAMP
+            // A host-requested shutdown can arrive after the scheduled
+            // report slot; re-arming that past waketime makes the timer ISR
+            // shut the MCU down again ("Rescheduled timer in the past").
+            // Re-arm from the current time instead of adding to a stale one.
+            a->next_begin_time = timer_read_time() + a->rest_time;
+#else
             a->next_begin_time += a->rest_time;
+#endif
             a->timer.waketime = a->next_begin_time;
             sched_add_timer(&a->timer);
         }
