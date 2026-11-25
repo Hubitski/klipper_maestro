@@ -26,6 +26,7 @@ import sys
 import time
 import errno
 import fcntl
+import termios
 import struct
 import select
 import signal
@@ -70,21 +71,58 @@ PERIPH_DESTS = {0x20, 0x30, 0x40}
 
 
 class KlipperPacketParser:
-    """Stream parser for extracting framed Klipper messages using a resilient sliding window."""
-    def __init__(self, name: str = "", allowed_dests=None, tap=None, label=None):
+    """Stream parser for extracting framed Klipper messages.
+
+    Frames have no leading sync: the length byte comes immediately after the
+    previous frame's trailing 0x7E.  On any framing error we therefore jump
+    past the next 0x7E (the end of the corrupt fragment) instead of deleting a
+    single byte and re-interpreting the same residue over and over.  The line
+    can also be cleared when it has been idle longer than a frame time, which
+    recovers from a truncated frame without relying on a tap log.
+    """
+    def __init__(self, name: str = "", allowed_dests=None, tap=None, label=None,
+                 idle_time=0.005):
         self.name = name
         self.allowed_dests = allowed_dests or VALID_DESTS
         self.buf = bytearray()
         self.bad_sync_count = 0
         self.tap = tap
         self.label = label or name
+        self.last_feed_time: Optional[float] = None
+        self.idle_time = idle_time
 
     def _report(self, reason):
         if self.tap is not None:
             self.tap.parse_error(self.label, reason, self.buf)
 
     def feed(self, data: bytes):
+        if not data:
+            return
         self.buf.extend(data)
+        self.last_feed_time = time.monotonic()
+
+    def _resync(self):
+        """Drop everything through the next SYNC byte (the corrupt frame's
+        trailer).  If no SYNC is present the whole residue is unusable."""
+        idx = self.buf.find(MESSAGE_SYNC, 1)
+        if idx < 0:
+            self.buf.clear()
+        else:
+            del self.buf[:idx + 1]
+
+    def idle_clear(self, now=None, idle_time=None):
+        """Clear a partial frame after the line has been quiet long enough
+        that no more bytes of it can still be in flight."""
+        if not self.buf or self.last_feed_time is None:
+            return False
+        if now is None:
+            now = time.monotonic()
+        if idle_time is None:
+            idle_time = self.idle_time
+        if now - self.last_feed_time > idle_time:
+            self.buf.clear()
+            return True
+        return False
 
     def next_packet(self) -> Optional[bytes]:
         while len(self.buf) >= MESSAGE_MIN:
@@ -97,8 +135,8 @@ class KlipperPacketParser:
             msglen = self.buf[0]
             if msglen < MESSAGE_MIN or msglen > MESSAGE_MAX:
                 self._report("bad-len")
-                del self.buf[:1]
                 self.bad_sync_count += 1
+                self._resync()
                 continue
 
             # Check DEST field in SEQ byte
@@ -106,8 +144,8 @@ class KlipperPacketParser:
             dest = msgseq & ~MESSAGE_SEQ_MASK
             if dest not in self.allowed_dests:
                 self._report("bad-dest")
-                del self.buf[:1]
                 self.bad_sync_count += 1
+                self._resync()
                 continue
 
             if len(self.buf) < msglen:
@@ -117,8 +155,8 @@ class KlipperPacketParser:
             # Verify sync trailer byte
             if self.buf[msglen - 1] != MESSAGE_SYNC:
                 self._report("bad-trailer")
-                del self.buf[:1]
                 self.bad_sync_count += 1
+                self._resync()
                 continue
 
             # Verify CRC16
@@ -126,8 +164,8 @@ class KlipperPacketParser:
             crc = crc16_ccitt(self.buf[:msglen - 3])
             if crc != msgcrc:
                 self._report("bad-crc")
-                del self.buf[:1]
                 self.bad_sync_count += 1
+                self._resync()
                 continue
 
             # Complete, valid packet found
@@ -248,6 +286,11 @@ class BusTap:
     ICOUNT_STRUCT_INTS = 20
     TIOCGICOUNT = 0x545D
 
+    # Large userspace buffer: the 1 ms arbiter loop must never block on a
+    # synchronous line flush.  maybe_flush() drains it on a timer / size.
+    FLUSH_INTERVAL = 0.5
+    FLUSH_BYTES = 32768
+
     def __init__(self, path):
         self.fh = None
         self.last_error_time = 0.0
@@ -255,18 +298,23 @@ class BusTap:
         self.stall_len = 0
         self.stall_time = 0.0
         self.stall_logged = False
+        self.resync_logged = False
         self.icount = None
         self.icount_time = 0.0
+        self._pending_bytes = 0
+        self._last_flush = time.monotonic()
         if not path:
             return
         try:
-            self.fh = open(path, "a", buffering=1)
+            self.fh = open(path, "a", buffering=65536)
             self._write("TAP started")
+            self.maybe_flush(force=True)
         except OSError as e:
             logging.warning("Tap log %s disabled: %s", path, e)
 
     def close(self):
         if self.fh is not None:
+            self.maybe_flush(force=True)
             try:
                 self.fh.close()
             except Exception:
@@ -280,9 +328,27 @@ class BusTap:
             now = time.time()
             stamp = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
                      + ".%03d" % (int((now % 1) * 1000),))
-            self.fh.write("%s %s\n" % (stamp, msg))
+            line = "%s %s\n" % (stamp, msg)
+            self.fh.write(line)
+            self._pending_bytes += len(line)
+            if self._pending_bytes >= self.FLUSH_BYTES:
+                self.maybe_flush(force=True)
         except Exception:
             pass
+
+    def maybe_flush(self, force=False):
+        if self.fh is None:
+            return
+        now = time.monotonic()
+        if (not force and self._pending_bytes < self.FLUSH_BYTES
+                and now - self._last_flush < self.FLUSH_INTERVAL):
+            return
+        try:
+            self.fh.flush()
+        except Exception:
+            pass
+        self._pending_bytes = 0
+        self._last_flush = now
 
     @staticmethod
     def _hex(buf, limit=24):
@@ -317,17 +383,23 @@ class BusTap:
                     % (label, reason, len(buf), self._hex(buf)))
 
     def stall(self, label, parser):
-        """Detect a frame that started with a valid header but stopped."""
+        """Diagnose a frame that stopped mid-way.
+
+        Purely observational: the parser performs its own idle resync so
+        recovery does not depend on the tap being enabled.
+        """
         now = time.monotonic()
         n = len(parser.buf)
         if n == 0:
             self.stall_len = 0
             self.stall_logged = False
+            self.resync_logged = False
             return
         if n != self.stall_len:
             self.stall_len = n
             self.stall_time = now
             self.stall_logged = False
+            self.resync_logged = False
             return
         if now - self.stall_time < 0.010:
             return
@@ -338,12 +410,10 @@ class BusTap:
             self.stall_logged = True
             self._write("STALL %s want=%d have=%d hex=%s"
                         % (label, want, n, self._hex(buf, 32)))
-        if now - self.stall_time > 0.050:
+        if now - self.stall_time > 0.050 and not self.resync_logged:
+            self.resync_logged = True
             self._write("RESYNC %s dropped=%d hex=%s"
                         % (label, n, self._hex(buf, 32)))
-            buf.clear()
-            self.stall_len = 0
-            self.stall_logged = False
 
     def poll_icount(self, fd, label="BUS"):
         """Log deltas of the kernel UART error counters (framing/overrun/...)."""
@@ -398,15 +468,22 @@ class MaestroMultiplexer:
         # Main link is raw passthrough, no frame parsing.
         self.main_tx_queue = bytearray()
 
+        # Idle threshold used to clear a half-received frame.  Two maximal
+        # frames' worth of wire time, with a 5 ms floor.
+        frame_time = (MESSAGE_MAX * 10.0) / float(baud_rate or 250000)
+        self.parser_idle_time = max(0.005, frame_time * 2.0)
+
         # Peripheral link.
         self.uart_parser = KlipperPacketParser(name="periph",
                                                allowed_dests=PERIPH_DESTS,
-                                               tap=tap, label="BUS")
+                                               tap=tap, label="BUS",
+                                               idle_time=self.parser_idle_time)
         self.uart_tx_queue = bytearray()
 
         # Half-Duplex Multi-Drop Bus Arbiter for the peripheral transceiver.
         self.bus_busy = False
         self.bus_active_dest = 0
+        self.bus_request_seq: Optional[int] = None
         self.bus_tx_time: Optional[float] = None
         self.bus_release_time: Optional[float] = None
         self.bus_timeout = bus_timeout  # inactivity timeout for a transaction
@@ -414,12 +491,33 @@ class MaestroMultiplexer:
         self.bus_hard_timeout = 0.200   # absolute wedge protection
         self.bus_busy_since = None
         self.bus_last_byte_time = 0.0
+        self.bus_last_activity = 0.0
         self.bus_pending_queue = collections.deque()
+        self.bus_last_release = None
 
-        # Local transceiver echo of our own transmitted frame.
-        self.pending_echo: Optional[bytes] = None
-        self.pending_echo_time = 0.0
-        self.echo_window = 0.050
+        # Never dispatch immediately after a timeout: give the bus a short
+        # quiet gap so a late slave frame cannot collide with the next request.
+        self.bus_recovery_guard = 0.003
+        self.bus_recovery_until = 0.0
+
+        # Per-node fairness / isolation.
+        self.bus_queue_per_node_max = 2
+        self.consecutive_timeouts: Dict[int, int] = {}
+        self.quarantine_until: Dict[int, float] = {}
+        self.quarantine_threshold = 3
+        self.quarantine_time = 1.0
+
+        # Local transceiver echo of our own transmitted frames.  A FIFO (not a
+        # single slot) so an echo delayed past a transaction boundary is still
+        # recognised and dropped instead of reaching Klippy as a fake response.
+        self.echo_fifo = collections.deque()
+        self.echo_fifo_max = 8
+        self.echo_window = 0.100
+
+        # New-Klippy-session heuristic: a request arriving after the bus has
+        # been idle for this long is treated as the start of a fresh session,
+        # so stale queued/PTY data from the previous client is discarded.
+        self.session_idle_time = 2.0
 
         self.running = False
 
@@ -510,36 +608,9 @@ class MaestroMultiplexer:
         last_stat_time = time.time()
 
         while self.running:
-            # Peripheral bus arbitration.  Release only after BUS_GUARD seconds
-            # of silence following the last packet, or on a response timeout.
-            now = time.monotonic()
-            if self.periph_fd is not None and self.bus_busy:
-                if (self.bus_busy_since is not None
-                        and now - self.bus_busy_since > self.bus_hard_timeout):
-                    logging.warning("Bus hard watchdog from 0x%02X",
-                                    self.bus_active_dest)
-                    self._release_bus("hard watchdog from 0x%02X"
-                                      % (self.bus_active_dest,))
-                elif (self.bus_release_time is not None
-                      and now >= self.bus_release_time
-                      and not self.uart_tx_queue
-                      and not self.uart_parser.buf):
-                    logging.debug("Bus idle after response from 0x%02X",
-                                  self.bus_active_dest)
-                    self._release_bus("idle after 0x%02X"
-                                      % (self.bus_active_dest,))
-                else:
-                    last_activity = self.bus_tx_time
-                    if (self.bus_last_byte_time
-                            and (last_activity is None
-                                 or self.bus_last_byte_time > last_activity)):
-                        last_activity = self.bus_last_byte_time
-                    if (last_activity is not None
-                            and now - last_activity > self.bus_timeout):
-                        logging.debug("Bus timeout from 0x%02X, releasing",
-                                      self.bus_active_dest)
-                        self._release_bus("timeout from 0x%02X"
-                                          % (self.bus_active_dest,))
+            # Peripheral bus arbitration (also performs the idle resync and
+            # retries a guard-delayed dispatch without blocking the loop).
+            self._service_bus()
 
             if self.main_fd is not None:
                 events = select.POLLIN | select.POLLERR | select.POLLHUP
@@ -587,6 +658,7 @@ class MaestroMultiplexer:
 
             if self.tap is not None:
                 self.tap.stall("BUS", self.uart_parser)
+                self.tap.maybe_flush()
                 if self.periph_fd is not None:
                     self.tap.poll_icount(self.periph_fd)
 
@@ -595,30 +667,144 @@ class MaestroMultiplexer:
                 last_stat_time = now
                 self.log_stats()
 
-    def _release_bus(self, reason="idle"):
+    def _service_bus(self, now=None):
+        """One arbiter tick.  Split out from run() so tests can drive it."""
+        if self.periph_fd is None:
+            return
+        if now is None:
+            now = time.monotonic()
+        # Independently of any tap, drop a half-frame once the line has been
+        # quiet long enough that the rest cannot still be arriving.
+        self.uart_parser.idle_clear(now=now, idle_time=self.parser_idle_time)
+        if self.bus_busy:
+            if (self.bus_busy_since is not None
+                    and now - self.bus_busy_since > self.bus_hard_timeout):
+                logging.warning("Bus hard watchdog from 0x%02X",
+                                self.bus_active_dest)
+                self._release_bus("hard watchdog from 0x%02X"
+                                  % (self.bus_active_dest,), timed_out=True)
+            elif (self.bus_release_time is not None
+                  and now >= self.bus_release_time
+                  and not self.uart_tx_queue):
+                logging.debug("Bus idle after response from 0x%02X",
+                              self.bus_active_dest)
+                self._release_bus("ack from 0x%02X"
+                                  % (self.bus_active_dest,))
+            else:
+                last_activity = self.bus_tx_time
+                if (self.bus_last_byte_time
+                        and (last_activity is None
+                             or self.bus_last_byte_time > last_activity)):
+                    last_activity = self.bus_last_byte_time
+                if (last_activity is not None
+                        and now - last_activity > self.bus_timeout):
+                    logging.debug("Bus timeout from 0x%02X, releasing",
+                                  self.bus_active_dest)
+                    self._release_bus("timeout from 0x%02X"
+                                      % (self.bus_active_dest,),
+                                      timed_out=True)
+        if not self.bus_busy:
+            self._dispatch_next_bus_packet()
+
+    def _release_bus(self, reason="idle", timed_out=False, kind=None):
+        dest = self.bus_active_dest
+        now = time.monotonic()
         if self.tap is not None:
             self.tap.event("release: " + reason)
         self.bus_busy = False
         self.bus_active_dest = 0
+        self.bus_request_seq = None
         self.bus_release_time = None
         self.bus_tx_time = None
         self.bus_busy_since = None
         self.bus_last_byte_time = 0.0
-        self.pending_echo = None
+        # NOTE: the echo FIFO is deliberately NOT cleared here.  The
+        # transceiver can mirror our request after the transaction has ended.
+        self.bus_last_release = kind or ("timeout" if timed_out else "ack")
+        if timed_out:
+            # Discard any half-parsed frame from the failed transaction and
+            # hold the bus quiet briefly before the next dispatch.
+            self.uart_parser.buf.clear()
+            self.bus_recovery_until = now + self.bus_recovery_guard
+            if dest:
+                self._register_timeout(dest, now)
         self._dispatch_next_bus_packet()
+
+    def _register_timeout(self, dest: int, now: float):
+        count = self.consecutive_timeouts.get(dest, 0) + 1
+        if count < self.quarantine_threshold:
+            self.consecutive_timeouts[dest] = count
+            return
+        self.consecutive_timeouts[dest] = 0
+        self.quarantine_until[dest] = now + self.quarantine_time
+        self._drop_queued_for(dest)
+        logging.warning("Quarantining 0x%02X for %.1fs after %d timeouts",
+                        dest, self.quarantine_time, count)
+        if self.tap is not None:
+            self.tap.event("quarantine 0x%02X (%d timeouts)"
+                           % (dest, count))
+
+    def _drop_queued_for(self, dest: int):
+        if not self.bus_pending_queue:
+            return
+        self.bus_pending_queue = collections.deque(
+            item for item in self.bus_pending_queue if item[0] != dest)
+
+    def _enqueue_bus_packet(self, dest: int, pkt: bytes):
+        """All downstream traffic goes through here (no direct-start bypass)."""
+        now = time.monotonic()
+        if now < self.quarantine_until.get(dest, 0.0):
+            logging.warning("Dropping packet for quarantined 0x%02X", dest)
+            if self.tap is not None:
+                self.tap.event("quarantine drop 0x%02X" % dest)
+            return
+        # Bound the per-node backlog so a retransmitting dead node cannot make
+        # the queue grow without limit.  Drop its oldest queued packet.
+        queued = [i for i, (d, _) in enumerate(self.bus_pending_queue)
+                  if d == dest]
+        if len(queued) >= self.bus_queue_per_node_max:
+            del self.bus_pending_queue[queued[0]]
+            logging.warning("Node 0x%02X queue full; dropped oldest packet",
+                            dest)
+        self.bus_pending_queue.append((dest, pkt))
+        self._dispatch_next_bus_packet()
+
+    def _dispatch_next_bus_packet(self):
+        if self.bus_busy:
+            return
+        # Never start a new transaction while the previous frame is still in
+        # the transmit FIFO, and honour the post-timeout recovery guard.
+        if self.uart_tx_queue:
+            return
+        now = time.monotonic()
+        if now < self.bus_recovery_until:
+            return
+        while self.bus_pending_queue:
+            dest, pkt = self.bus_pending_queue.popleft()
+            if now < self.quarantine_until.get(dest, 0.0):
+                logging.warning("Skipping packet for quarantined 0x%02X",
+                                dest)
+                if self.tap is not None:
+                    self.tap.event("quarantine skip 0x%02X" % dest)
+                continue
+            self._start_bus_packet(dest, pkt)
+            return
 
     def _start_bus_packet(self, dest: int, pkt: bytes):
         self.bus_busy = True
         self.bus_active_dest = dest
+        self.bus_request_seq = pkt[1] & MESSAGE_SEQ_MASK
         self.bus_tx_time = None
         self.bus_release_time = None
         self.bus_busy_since = time.monotonic()
         self.bus_last_byte_time = 0.0
-        # Arm the echo filter with the exact frame we are about to put on the
-        # bus.  The transceiver mirrors it back; the node's real response can
-        # only arrive later and is a different frame.
-        self.pending_echo = pkt
-        self.pending_echo_time = time.monotonic()
+        self.bus_last_activity = self.bus_busy_since
+        # Record the exact frame we are about to put on the bus.  The
+        # transceiver mirrors it back; the node's real response can only
+        # arrive later and is a different frame.
+        self.echo_fifo.append((pkt, self.bus_busy_since))
+        while len(self.echo_fifo) > self.echo_fifo_max:
+            self.echo_fifo.popleft()
         if self.tap is not None:
             self.tap.packet("REQ  ->", pkt)
         self.uart_tx_queue.extend(pkt)
@@ -632,29 +818,64 @@ class MaestroMultiplexer:
         now = time.monotonic()
         self.bus_tx_time = now
         self.bus_last_byte_time = now
-        if len(pkt) == MESSAGE_MIN and not self.uart_parser.buf:
-            # The polled slave appends its terminating ACK/NAK last.
+        if len(pkt) == MESSAGE_MIN:
+            seq = pkt[1] & MESSAGE_SEQ_MASK
+            expected = ((self.bus_request_seq + 1) & MESSAGE_SEQ_MASK
+                        if self.bus_request_seq is not None else None)
+            if expected is not None and seq == expected:
+                # The slave's terminating ACK/NAK, correlated by sequence.
+                self.consecutive_timeouts[dest] = 0
+                self.bus_release_time = now + self.bus_guard
+                return
+            # A stale 5-byte frame for another request: it is still forwarded
+            # upstream by the caller, but it must not end this transaction.
+        # Data that arrives after the ACK extends the release deadline; data
+        # before any ACK keeps it unset (wait for ACK or inactivity timeout).
+        if self.bus_release_time is not None:
             self.bus_release_time = now + self.bus_guard
-        else:
-            # Data block: the burst is not finished.  Wait for the ACK or
-            # for the inactivity timeout; never release after a data block.
-            self.bus_release_time = None
 
-    def _dispatch_next_bus_packet(self):
-        if not self.bus_busy and self.bus_pending_queue:
-            dest, pkt = self.bus_pending_queue.popleft()
-            self._start_bus_packet(dest, pkt)
+    def _purge_echoes(self, now):
+        # Only age out expected echoes once the line itself has been idle for
+        # a safe interval; an echo is a near-instant mirror of our own TX.
+        if (self.bus_last_activity
+                and now - self.bus_last_activity <= self.echo_window):
+            return
+        while (self.echo_fifo
+               and now - self.echo_fifo[0][1] > self.echo_window):
+            self.echo_fifo.popleft()
 
     def _is_echo(self, pkt: bytes) -> bool:
-        if self.pending_echo is None:
-            return False
-        if time.monotonic() - self.pending_echo_time > self.echo_window:
-            self.pending_echo = None
-            return False
-        if pkt == self.pending_echo:
-            self.pending_echo = None
-            return True
+        now = time.monotonic()
+        self._purge_echoes(now)
+        for i, (epkt, _etime) in enumerate(self.echo_fifo):
+            if pkt == epkt:
+                del self.echo_fifo[i]
+                return True
         return False
+
+    def _flush_slave_input(self, chan: "VirtualChannel"):
+        if chan.slave_fd is None:
+            return
+        try:
+            termios.tcflush(chan.slave_fd, termios.TCIFLUSH)
+        except OSError:
+            pass
+
+    def _reset_session_state(self):
+        """Discard buffered traffic from a previous Klippy session.
+
+        Heuristic: the first request after the bus has been idle for
+        session_idle_time is treated as a new client.  (The PTY pair itself is
+        kept open: closing the slave would HUP-loop the master.)
+        """
+        logging.info("New Klippy session suspected; clearing stale bus/PTY "
+                     "state")
+        if self.tap is not None:
+            self.tap.event("new session: clear stale state")
+        self.bus_pending_queue.clear()
+        for chan in self.channels.values():
+            chan.tx_queue.clear()
+            self._flush_slave_input(chan)
 
     # ------------------------------------------------------------ serial I/O
     def handle_serial_read(self, link: str):
@@ -669,7 +890,9 @@ class MaestroMultiplexer:
         if not data:
             return
         if link == 'periph':
-            self.bus_last_byte_time = time.monotonic()
+            now = time.monotonic()
+            self.bus_last_byte_time = now
+            self.bus_last_activity = now
 
         if link == 'main':
             # Direct motherboard link: pass bytes through untouched.
@@ -726,14 +949,15 @@ class MaestroMultiplexer:
                 logging.error("%s UART write error: %s", link, e)
                 queue.clear()
                 if link == 'periph':
-                    # Never leave the arbiter wedged on a broken write.
-                    self.pending_echo = None
-                    self.bus_busy = False
-                    self.bus_active_dest = 0
-                    self.bus_release_time = None
-                    self.bus_tx_time = None
-                    self.bus_busy_since = None
-                    self.bus_last_byte_time = 0.0
+                    # Never leave the arbiter wedged on a broken write, but
+                    # still go through the normal release/dispatch path.
+                    self.uart_parser.buf.clear()
+                    self.bus_recovery_until = max(
+                        self.bus_recovery_until,
+                        time.monotonic() + self.bus_recovery_guard)
+                    self._release_bus("write error on 0x%02X"
+                                      % (self.bus_active_dest,),
+                                      kind="write-error")
         if (link == 'periph' and not queue and self.bus_busy
                 and self.bus_tx_time is None and self.bus_release_time is None):
             self.bus_tx_time = time.monotonic()
@@ -755,14 +979,19 @@ class MaestroMultiplexer:
         chan.tx_queue.extend(data)
         self._flush_pty(chan)
 
-    def handle_channel_hup(self, chan: VirtualChannel, poll: select.poll):
-        old_fd = chan.master_fd
-        if old_fd in self.fd_to_channel:
-            del self.fd_to_channel[old_fd]
-        chan.reopen(poll)
-        self.fd_to_channel[chan.master_fd] = chan
-        logging.info("Channel %s PTY reset (new fd=%d)",
-                     chan.name, chan.master_fd)
+    def handle_channel_hup(self, chan: VirtualChannel,
+                           poll: Optional[select.poll] = None):
+        """The PTY client went away.
+
+        Keep the PTY pair (and its stable symlink) open.  Closing the slave
+        would make the master HUP-loop before the next client connects, so we
+        only discard buffered state; the next Klippy session opens the same
+        device node.
+        """
+        logging.info("Channel %s client disconnected; keeping PTY %s",
+                     chan.name, chan.symlink_path)
+        chan.tx_queue.clear()
+        chan.parser.buf.clear()
 
     def handle_channel_read(self, chan: VirtualChannel, poll: select.poll):
         try:
@@ -787,16 +1016,25 @@ class MaestroMultiplexer:
 
         chan.rx_bytes += len(data)
         chan.parser.feed(data)
+
+        # New-session heuristic: a request arriving after a long quiet period
+        # is the first command of a (re)started Klippy.  Drop buffered state
+        # from the previous session before queueing it.
+        now = time.monotonic()
+        if (self.bus_last_activity
+                and now - self.bus_last_activity > self.session_idle_time):
+            self._reset_session_state()
+        self.bus_last_activity = now
+
         while True:
             pkt = chan.parser.next_packet()
             if pkt is None:
                 break
             chan.rx_packets += 1
             out_pkt = rewrite_packet_dest(pkt, new_dest=chan.node_id)
-            if not self.bus_busy:
-                self._start_bus_packet(chan.node_id, out_pkt)
-            else:
-                self.bus_pending_queue.append((chan.node_id, out_pkt))
+            # Every request goes through the bounded per-node queue; the
+            # arbiter decides when the bus is free.
+            self._enqueue_bus_packet(chan.node_id, out_pkt)
 
     def log_stats(self):
         stats = []
