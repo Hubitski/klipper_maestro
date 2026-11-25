@@ -73,7 +73,10 @@ DECL_INIT(prescaler_init);
 // floating gate.  The bed has WANT_STEPPER=n so its PD4/PD5 heater gates
 // are not touched.
 #if CONFIG_MACH_atmega16 && CONFIG_WANT_STEPPER
-static void
+// DECL_INIT() records the function name in .compile_time_request and the
+// generated ctr_run_initfuncs() calls it from another translation unit, so
+// this must not be static or the link fails with an undefined symbol.
+void
 toolhead_fans_init(void)
 {
     DDRD |= (1 << PD4) | (1 << PD5);
