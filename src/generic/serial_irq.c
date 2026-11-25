@@ -16,10 +16,14 @@
 
 #if CONFIG_HAVE_LIMITED_CODE_SIZE && CONFIG_SERIAL_POLLED_SLAVE
 #if CONFIG_WANT_STEPPER
-// Toolhead: one max-size block each way.  TX must hold the 3-sample HX711
-// report + status/trigger response + ACK.
+// Toolhead: TX must hold the 3-sample HX711 report + status/trigger
+// response + ACK.  64 bytes is exactly one such burst; a late host poll
+// (or a second queued bulk report) overflowed it and the node timed out
+// on the shared bus.  128 gives headroom; the extra 64 B comes out of
+// the move-queue heap (605 -> 541), which still holds the load cell and
+// the 8 move slots.
 #define RX_BUFFER_SIZE 64
-#define TX_BUFFER_SIZE 64
+#define TX_BUFFER_SIZE 128
 #else
 // Bed (no steppers): four analog_in channels at report_time 0.5 emit up
 // to 8 x 15-byte analog_in_state reports between the ~1 Hz get_clock
