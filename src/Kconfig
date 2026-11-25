@@ -285,6 +285,20 @@ config ADC_TIMER_CLAMP_REPORT_ONLY
         that can fall into the past when the heater/PID task starves the
         ADC task; clamp only that path and leave the short sample delays
         unclamped.
+
+config ADC_QUERY_CLAMP
+    bool "Clamp the host supplied query clock"
+    depends on ADC_TIMER_CLAMP
+    default n
+    help
+        command_query_analog_in() schedules its first sample at a clock
+        supplied by the host.  On the polled multi-drop bus the config
+        block can arrive late enough that this clock is already in the
+        past, and sched_add_timer() then shuts the MCU down with "Timer
+        too close".  Enable this on the bed, whose config block is the
+        last one delivered.  The 16KB toolheads need the flash elsewhere;
+        their single ADC channel is configured before the bus is busy.
+
 config WANT_SPI
     bool "Support communicating with external chips via SPI bus"
     depends on HAVE_GPIO && HAVE_GPIO_SPI

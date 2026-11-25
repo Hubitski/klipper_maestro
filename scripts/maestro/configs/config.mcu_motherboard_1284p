@@ -23,6 +23,9 @@ CONFIG_HAVE_GPIO_I2C=y
 CONFIG_HAVE_GPIO_HARD_PWM=y
 CONFIG_HAVE_STRICT_TIMING=y
 CONFIG_WANT_ADC=y
+# Keep the query-clock clamp on the main board too (it was on by default
+# before it became a separate option); 128KB flash has plenty of room.
+CONFIG_ADC_QUERY_CLAMP=y
 CONFIG_WANT_SPI=y
 CONFIG_WANT_SOFTWARE_SPI=y
 CONFIG_WANT_HARD_PWM=y

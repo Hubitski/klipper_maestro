@@ -22,9 +22,12 @@ CONFIG_WANT_ADC=y
 # The toolhead has a single ADC channel; clamp the report path (which the
 # heater task can starve) and leave the short sample delays unclamped.
 # This frees the flash needed for the pre-Klipper hotend fan.  The bed
-# keeps the full clamp (several ADC channels).
+# keeps the full clamp (several ADC channels).  The host-supplied query
+# clock clamp is bed-only: it does not fit 16KB together with the fans and
+# the load-cell code, and the toolhead queries its ADC at startup.
 CONFIG_ADC_TIMER_CLAMP=y
 CONFIG_ADC_TIMER_CLAMP_REPORT_ONLY=y
+CONFIG_ADC_QUERY_CLAMP=n
 # Hotend fan (PD4) on / part fan (PD5) off before Klipper connects is
 # done by toolhead_fans_init() in src/avr/main.c: the generic
 # CONFIG_INITIAL_PINS table costs ~44 bytes and does not fit 16KB.

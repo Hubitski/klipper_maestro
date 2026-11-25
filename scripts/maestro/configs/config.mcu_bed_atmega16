@@ -24,6 +24,10 @@ CONFIG_HAVE_GPIO=y
 CONFIG_HAVE_GPIO_ADC=y
 CONFIG_HAVE_STRICT_TIMING=y
 CONFIG_WANT_ADC=y
+# The bed's config block arrives last on the polled bus and its query clock
+# can already be in the past -> "Timer too close" during config.  The bed has
+# the flash for this clamp; the toolheads do not (see their profiles).
+CONFIG_ADC_QUERY_CLAMP=y
 # Code size optimizations for ATmega16 (16KB Flash / 1KB RAM)
 CONFIG_WANT_DEBUGCMDS=n
 CONFIG_WANT_STATS=n

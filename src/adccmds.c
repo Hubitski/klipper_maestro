@@ -127,12 +127,14 @@ command_query_analog_in(uint32_t *args)
     sched_del_timer(&a->timer);
     gpio_adc_cancel_sample(a->pin);
     a->next_begin_time = args[1];
-#if CONFIG_ADC_TIMER_CLAMP
+#if CONFIG_ADC_QUERY_CLAMP
     // The query clock comes from the host.  On the polled multi-drop bus
     // the config block can be delivered late enough that this clock is
     // already past, and the sched_add_timer() below then shuts the MCU
     // down with "Timer too close" during config (seen on the bed).  Clamp
-    // it exactly like the report path.
+    // it exactly like the report path.  Only the bed enables this: the
+    // 16KB toolheads need the flash for the fans/load cell and their one
+    // ADC channel is queried before the bus gets busy.
     {
         uint32_t now = timer_read_time();
         if (timer_is_before(a->next_begin_time, now))
